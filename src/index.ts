@@ -56,6 +56,7 @@ type Variables = {
   freeTierLimit: number;
   telemetryBody?: TelemetryBlip;
   idempotencyKey?: string;
+  blipId?: string;
 };
 
 type TelemetryBlip = {
@@ -92,6 +93,8 @@ type ActivityEntry = {
   event: string;
   billingMode: BillingMode;
   ingestedAt: string;
+  transactionHash?: string | null;
+  success?: boolean;
 };
 
 const ACTIVITY_KEY = 'activity:recent';
@@ -317,8 +320,39 @@ async function appendActivity(kv: KVNamespace, entry: ActivityEntry): Promise<vo
       recent = [];
     }
   }
-  recent.unshift(entry);
+  recent.unshift({ ...entry, success: true });
   await kv.put(ACTIVITY_KEY, JSON.stringify(recent.slice(0, ACTIVITY_LIMIT)));
+}
+
+async function attachActivityTransaction(
+  kv: KVNamespace,
+  blipId: string,
+  transactionHash: string,
+): Promise<void> {
+  const raw = await kv.get(ACTIVITY_KEY);
+  if (!raw) return;
+  try {
+    const recent = JSON.parse(raw) as ActivityEntry[];
+    if (!Array.isArray(recent)) return;
+    const index = recent.findIndex((entry) => entry.blipId === blipId);
+    if (index < 0) return;
+    recent[index] = { ...recent[index], transactionHash };
+    await kv.put(ACTIVITY_KEY, JSON.stringify(recent));
+  } catch {
+    // Activity log is best-effort; ingest already succeeded.
+  }
+}
+
+async function readRecentActivity(kv: KVNamespace): Promise<ActivityEntry[]> {
+  const raw = await kv.get(ACTIVITY_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as ActivityEntry[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry) => entry.success !== false);
+  } catch {
+    return [];
+  }
 }
 
 async function listAgentUsage(kv: KVNamespace): Promise<Array<{ agentId: string; record: UsageRecord }>> {
@@ -738,6 +772,12 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
 
       response.headers.set('X-PAYMENT-RESPONSE', settleResponseHeader(settlement));
       c.res = response;
+
+      const blipId = c.get('blipId');
+      const transactionHash = typeof settlement.transaction === 'string' ? settlement.transaction : '';
+      if (blipId && transactionHash) {
+        c.executionCtx.waitUntil(attachActivityTransaction(c.env.USAGE_KV, blipId, transactionHash));
+      }
     } catch (error) {
       c.res = c.json(
         {
@@ -779,6 +819,7 @@ app.get('/api', (c) => {
       telemetry: 'POST /api/telemetry',
       telemetryStatus: 'GET /api/telemetry/status',
       telemetryOverview: 'GET /api/telemetry/overview',
+      telemetryActivity: 'GET /api/telemetry/activity',
       adminAgent: 'POST /api/admin/agent',
     },
   });
@@ -823,16 +864,7 @@ app.get('/api/telemetry/overview', async (c) => {
     return (b.lastSeen ?? '').localeCompare(a.lastSeen ?? '');
   });
 
-  const activityRaw = await c.env.USAGE_KV.get(ACTIVITY_KEY);
-  let recent: ActivityEntry[] = [];
-  if (activityRaw) {
-    try {
-      const parsed = JSON.parse(activityRaw) as ActivityEntry[];
-      if (Array.isArray(parsed)) recent = parsed;
-    } catch {
-      recent = [];
-    }
-  }
+  const recent = await readRecentActivity(c.env.USAGE_KV);
 
   const activeAgents = agents.filter((agent) => agent.active).length;
   const usageCount = agents.reduce((sum, agent) => sum + agent.usageCount, 0);
@@ -860,6 +892,17 @@ app.get('/api/telemetry/overview', async (c) => {
     },
     agents,
     recent,
+  });
+});
+
+app.get('/api/telemetry/activity', async (c) => {
+  const limit = parsePositiveInt(c.req.query('limit'), 25);
+  const events = (await readRecentActivity(c.env.USAGE_KV)).slice(0, Math.min(limit, ACTIVITY_LIMIT));
+  return c.json({
+    status: 'success',
+    protocol: 'x402',
+    network: c.env.X402_NETWORK ?? DEFAULT_X402_NETWORK,
+    events,
   });
 });
 
@@ -934,7 +977,10 @@ app.post('/api/telemetry', createTelemetryIdempotencyGate(), createTelemetryPaym
       event: body.event,
       billingMode,
       ingestedAt: new Date().toISOString(),
+      transactionHash: null,
+      success: true,
     });
+    c.set('blipId', blipId);
 
     const usageCount = c.get('usageCount');
     const freeTierLimit = c.get('freeTierLimit');

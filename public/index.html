@@ -21,6 +21,7 @@
       --ok: #8aaa7a;
       --warn: #c48a4a;
       --alert: #c46a5a;
+      --red: #c43c3c;
       --line: rgba(198, 161, 91, 0.22);
       --shadow: 0 18px 40px rgba(4, 10, 18, 0.35);
     }
@@ -347,8 +348,70 @@
     }
 
     .feed {
-      max-height: 280px;
+      max-height: none;
       overflow: auto;
+    }
+
+    .activity-wrap {
+      margin-top: 16px;
+    }
+
+    .activity-table {
+      width: 100%;
+    }
+
+    .activity-table th,
+    .activity-table td {
+      vertical-align: top;
+    }
+
+    .activity-table tbody tr {
+      background: rgba(27, 30, 34, 0.45);
+    }
+
+    .activity-table tbody tr:nth-child(even) {
+      background: rgba(12, 34, 56, 0.55);
+    }
+
+    .activity-table tbody tr.fresh {
+      box-shadow: inset 3px 0 0 var(--gold);
+    }
+
+    .blip-id,
+    .tx-hash {
+      color: var(--gold-soft);
+      text-decoration: none;
+      word-break: break-all;
+    }
+
+    .tx-hash:hover,
+    .blip-id:hover {
+      color: var(--gold);
+    }
+
+    .tx-missing {
+      color: var(--parchment-dim);
+    }
+
+    .copy {
+      margin-left: 6px;
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--parchment-dim);
+      padding: 2px 7px;
+      font-size: 0.65rem;
+      border-radius: 6px;
+    }
+
+    .copy:hover {
+      color: var(--gold);
+      background: rgba(198, 161, 91, 0.1);
+    }
+
+    .pill.paid {
+      color: #f3d0cc;
+      border-color: rgba(196, 60, 60, 0.55);
+      background: rgba(196, 60, 60, 0.16);
     }
 
     .feed-item {
@@ -466,17 +529,21 @@
             </div>
           </div>
         </div>
-        <div class="panel">
-          <div class="panel-head"><h2>Recent blips</h2></div>
-          <div class="feed" id="feed">
-            <div class="empty">No recent activity yet.</div>
-          </div>
-        </div>
+      </div>
+    </section>
+
+    <section class="panel activity-wrap">
+      <div class="panel-head">
+        <h2>Recent successful events</h2>
+        <span class="pill gold" id="activity-count">Live</span>
+      </div>
+      <div class="feed" id="feed">
+        <div class="empty">No successful blips yet.</div>
       </div>
     </section>
 
     <footer>
-      <span>Worker <span id="footer-status">online</span> · GET /api/telemetry/overview</span>
+      <span>Worker <span id="footer-status">online</span> · GET /api/telemetry/overview · GET /api/telemetry/activity</span>
       <span id="footer-meta">protocol x402</span>
     </footer>
   </div>
@@ -585,19 +652,79 @@
       `;
     }
 
-    function renderFeed(recent) {
+    let seenBlipIds = new Set();
+
+    function shorten(value, lead = 10, tail = 6) {
+      const text = String(value ?? '');
+      if (text.length <= lead + tail + 1) return text;
+      return `${text.slice(0, lead)}…${text.slice(-tail)}`;
+    }
+
+    function basescanTx(hash) {
+      return `https://basescan.org/tx/${hash}`;
+    }
+
+    function renderFeed(events) {
       const mount = document.getElementById('feed');
-      if (!recent?.length) {
-        mount.innerHTML = '<div class="empty">No recent activity yet.</div>';
+      const count = document.getElementById('activity-count');
+      const successful = (events || []).filter((item) => item.success !== false);
+      count.textContent = `${successful.length} events`;
+
+      if (!successful.length) {
+        mount.innerHTML = '<div class="empty">No successful blips yet. Ingest a heartbeat to populate this feed.</div>';
         return;
       }
-      mount.innerHTML = recent.slice(0, 16).map((item) => `
-        <div class="feed-item">
-          <span class="mono" style="color:var(--parchment-dim)">${rel(item.ingestedAt)}</span>
-          <span><strong>${escapeHtml(item.event)}</strong><div class="mono" style="color:var(--parchment-dim);margin-top:3px;">${escapeHtml(item.agentId)}</div></span>
-          ${item.billingMode === 'paid' ? pill('warn', 'paid') : pill('ok', 'free')}
-        </div>
-      `).join('');
+
+      const incomingIds = successful.map((item) => item.blipId).filter(Boolean);
+      const fresh = new Set(incomingIds.filter((id) => !seenBlipIds.has(id)));
+      if (seenBlipIds.size === 0) fresh.clear();
+      seenBlipIds = new Set(incomingIds);
+
+      mount.innerHTML = `
+        <table class="activity-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Blip ID</th>
+              <th>Transaction</th>
+              <th>Mode</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${successful.slice(0, 25).map((item) => {
+              const hash = item.transactionHash || item.txHash || '';
+              const hashCell = hash
+                ? `<a class="tx-hash mono" href="${basescanTx(hash)}" target="_blank" rel="noreferrer">${escapeHtml(shorten(hash, 12, 8))}</a>
+                   <button type="button" class="copy" data-copy="${escapeHtml(hash)}">Copy</button>`
+                : '<span class="tx-missing mono">— off-chain</span>';
+              const blip = item.blipId
+                ? `<span class="blip-id mono" title="${escapeHtml(item.blipId)}">${escapeHtml(shorten(item.blipId, 8, 4))}</span>
+                   <button type="button" class="copy" data-copy="${escapeHtml(item.blipId)}">Copy</button>`
+                : '—';
+              return `
+                <tr class="${fresh.has(item.blipId) ? 'fresh' : ''}">
+                  <td class="mono" style="color:var(--parchment-dim);white-space:nowrap;">${rel(item.ingestedAt)}</td>
+                  <td>
+                    <strong>${escapeHtml(item.event)}</strong>
+                    <div class="mono" style="color:var(--parchment-dim);margin-top:4px;">${escapeHtml(item.agentId)}</div>
+                  </td>
+                  <td>${blip}</td>
+                  <td>${hashCell}</td>
+                  <td>${item.billingMode === 'paid' ? pill('paid', 'paid · x402') : pill('ok', 'free')}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    async function loadActivity() {
+      const response = await fetch('/api/telemetry/activity?limit=25');
+      if (!response.ok) throw new Error('Activity request failed');
+      const data = await response.json();
+      renderFeed(data.events || data.recent || []);
     }
 
     async function loadOverview() {
@@ -620,7 +747,6 @@
       document.getElementById('live-label').textContent = 'Live';
 
       renderAgents(data);
-      renderFeed(data.recent);
     }
 
     async function inspectAgent() {
@@ -672,6 +798,7 @@
     async function tick() {
       try {
         await loadOverview();
+        await loadActivity();
         await inspectAgent();
       } catch (error) {
         document.getElementById('pulse').classList.add('offline');
@@ -680,6 +807,17 @@
       }
     }
 
+    document.getElementById('feed').addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-copy]');
+      if (!button) return;
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy);
+        button.textContent = 'Copied';
+        setTimeout(() => { button.textContent = 'Copy'; }, 1200);
+      } catch {
+        button.textContent = 'Fail';
+      }
+    });
     document.getElementById('inspect-btn').addEventListener('click', inspectAgent);
     agentInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') inspectAgent();
