@@ -4,6 +4,27 @@
 
 Agentblips provides a frictionless cryptographic toll booth for autonomous agents. When an agent exhausts its free tier, our edge worker responds with an HTTP `402 Payment Required` challenge. The client SDK automatically signs an EIP-3009 micro-settlement in USDC on Base, settles instantly, and continues its execution loop without human intervention.
 
+The same origin serves a **live telemetry HUD**—deep navy, charcoal, parchment, tarnished gold, and red—so operators can watch the loop without a second app.
+
+---
+
+## Live telemetry HUD
+
+Open the Worker origin. The dashboard is the product surface, not an afterthought.
+
+**[agentblips-core.agentblips-spenser.workers.dev](https://agentblips-core.agentblips-spenser.workers.dev)**
+
+It polls `/api/telemetry/overview` and `/api/telemetry/activity` every few seconds. No SDK, no extra auth for read-only fleet view.
+
+| Capability | What you see |
+| --- | --- |
+| **Live activity polling** | Successful events stream in as they ingest—event name, agent, time |
+| **Copyable blip IDs** | Each row exposes the ingest UUID; copy is one click |
+| **Basescan transaction hashes** | Paid x402 settlements link the hash to Basescan on Base; free-tier blips stay marked off-chain |
+| **Fleet meters** | Active agents, usage, remaining free-tier, x402 posture, block state |
+
+Paid rows use red. Identifiers sit in gold on charcoal panels over navy. Body copy is parchment.
+
 ---
 
 ## 🚀 Quickstart in 60 Seconds
@@ -39,6 +60,6 @@ await client.sendTelemetry(
 );
 ```
 
-Live HUD: [agentblips-core.agentblips-spenser.workers.dev](https://agentblips-core.agentblips-spenser.workers.dev)
+Blips appear on the HUD on the next poll. Paid settlements show a Basescan link once the facilitator returns a transaction hash.
 
-Full operator guide: [QUICKSTART.md](./QUICKSTART.md)
+Full operator guide: [QUICKSTART.md](./QUICKSTART.md) · protocol internals: [WIKI.md](./WIKI.md)
