@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agentblips — Telemetry HUD</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --navy: #071422;
+      --navy-mid: #0c2238;
+      --navy-lift: #123049;
+      --charcoal: #1b1e22;
+      --parchment: #efe6d4;
+      --parchment-dim: #c9bfaa;
+      --gold: #c6a15b;
+      --gold-soft: #d4bc7a;
+      --gold-dim: #8a7038;
+      --ok: #8aaa7a;
+      --warn: #c48a4a;
+      --alert: #c46a5a;
+      --line: rgba(198, 161, 91, 0.22);
+      --shadow: 0 18px 40px rgba(4, 10, 18, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background:
+        radial-gradient(1200px 500px at 8% -10%, rgba(198, 161, 91, 0.08), transparent 50%),
+        radial-gradient(900px 420px at 100% 0%, rgba(26, 74, 92, 0.28), transparent 55%),
+        var(--navy);
+      color: var(--parchment);
+      font-family: "IBM Plex Sans", system-ui, sans-serif;
+    }
+
+    body {
+      padding: 28px 32px 48px;
+    }
+
+    .shell {
+      max-width: 1280px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      padding-bottom: 22px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 28px;
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .wordmark {
+      font-family: Newsreader, Georgia, serif;
+      font-size: 2.15rem;
+      letter-spacing: -0.03em;
+      margin: 0;
+    }
+
+    .wordmark span {
+      color: var(--gold);
+    }
+
+    .tagline {
+      margin: 0;
+      color: var(--parchment-dim);
+      font-size: 0.92rem;
+    }
+
+    .meta {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.75rem;
+      color: var(--parchment-dim);
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .admin-key {
+      width: 210px;
+      padding: 8px 10px;
+      font-size: 0.75rem;
+    }
+
+    .live {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--gold-soft);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .pulse {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--ok);
+      box-shadow: 0 0 0 0 rgba(138, 170, 122, 0.7);
+      animation: pulse 2s infinite;
+    }
+
+    .pulse.offline {
+      background: var(--alert);
+      animation: none;
+    }
+
+    @keyframes pulse {
+      70% { box-shadow: 0 0 0 8px rgba(138, 170, 122, 0); }
+    }
+
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .card {
+      background: linear-gradient(180deg, rgba(18, 48, 73, 0.72), rgba(12, 34, 56, 0.88));
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      padding: 18px 18px 16px;
+    }
+
+    .card .label {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--gold);
+      margin-bottom: 10px;
+    }
+
+    .card .value {
+      font-family: Newsreader, Georgia, serif;
+      font-size: 2rem;
+      line-height: 1;
+    }
+
+    .card .hint {
+      margin-top: 10px;
+      color: var(--parchment-dim);
+      font-size: 0.82rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.45fr 0.9fr;
+      gap: 16px;
+    }
+
+    .panel {
+      background: rgba(7, 20, 34, 0.55);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel-head h2 {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 12px 16px;
+      font-size: 0.86rem;
+      border-bottom: 1px solid rgba(198, 161, 91, 0.1);
+    }
+
+    th {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--parchment-dim);
+      font-weight: 500;
+    }
+
+    tbody tr:hover {
+      background: rgba(198, 161, 91, 0.05);
+    }
+
+    .mono {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.78rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 0.72rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+    }
+
+    .pill.ok { color: var(--ok); border-color: rgba(138, 170, 122, 0.35); background: rgba(138, 170, 122, 0.08); }
+    .pill.warn { color: var(--warn); border-color: rgba(196, 138, 74, 0.4); background: rgba(196, 138, 74, 0.1); }
+    .pill.alert { color: var(--alert); border-color: rgba(196, 106, 90, 0.4); background: rgba(196, 106, 90, 0.1); }
+    .pill.gold { color: var(--gold-soft); border-color: var(--line); background: rgba(198, 161, 91, 0.08); }
+
+    .bar {
+      height: 6px;
+      border-radius: 99px;
+      background: rgba(239, 230, 212, 0.08);
+      overflow: hidden;
+      min-width: 84px;
+    }
+
+    .bar > span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, var(--gold-dim), var(--gold));
+    }
+
+    .inspect {
+      padding: 16px 18px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    label {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--parchment-dim);
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+    }
+
+    input {
+      flex: 1;
+      background: var(--navy);
+      border: 1px solid var(--line);
+      color: var(--parchment);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: 500 0.86rem "IBM Plex Mono", ui-monospace, monospace;
+    }
+
+    button {
+      background: var(--gold);
+      color: var(--navy);
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font: 600 0.82rem "IBM Plex Sans", sans-serif;
+      cursor: pointer;
+    }
+
+    button:hover { background: var(--gold-soft); }
+
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .btn-ghost,
+    .btn-danger {
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--parchment);
+      padding: 6px 9px;
+      font-size: 0.72rem;
+      border-radius: 8px;
+    }
+
+    .btn-ghost:hover { background: rgba(198, 161, 91, 0.12); color: var(--gold-soft); }
+    .btn-danger { border-color: rgba(196, 106, 90, 0.45); color: var(--alert); }
+    .btn-danger:hover { background: rgba(196, 106, 90, 0.12); }
+
+    .toast {
+      min-height: 1.1rem;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.72rem;
+      color: var(--gold-soft);
+    }
+
+    .toast.error { color: var(--alert); }
+
+    tr.blocked { opacity: 0.72; }
+
+    .inspect-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .stat {
+      background: rgba(18, 48, 73, 0.55);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+    }
+
+    .stat b {
+      display: block;
+      font-size: 1.15rem;
+      margin-top: 4px;
+    }
+
+    .feed {
+      max-height: 280px;
+      overflow: auto;
+    }
+
+    .feed-item {
+      display: grid;
+      grid-template-columns: 88px 1fr auto;
+      gap: 10px;
+      padding: 11px 16px;
+      border-bottom: 1px solid rgba(198, 161, 91, 0.1);
+      font-size: 0.82rem;
+    }
+
+    .empty {
+      padding: 28px 18px;
+      color: var(--parchment-dim);
+      text-align: center;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+    }
+
+    .panel .toast {
+      padding: 8px 18px 0;
+    }
+
+    footer {
+      margin-top: 22px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--parchment-dim);
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.72rem;
+    }
+
+    @media (max-width: 980px) {
+      .kpis, .grid { grid-template-columns: 1fr 1fr; }
+      header { flex-direction: column; align-items: flex-start; }
+    }
+
+    @media (max-width: 720px) {
+      body { padding: 20px 16px 36px; }
+      .kpis, .grid, .inspect-stats { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="brand">
+        <h1 class="wordmark">Agent<span>blips</span></h1>
+        <p class="tagline">Real-time telemetry HUD for autonomous agent loops.</p>
+      </div>
+      <div class="meta">
+        <label for="admin-key" class="sr-only">Admin key</label>
+        <input id="admin-key" class="admin-key" type="password" placeholder="X-Admin-Key" autocomplete="off" />
+        <span class="live"><span id="pulse" class="pulse"></span><span id="live-label">Live</span></span>
+        <span id="updated">Refreshing…</span>
+      </div>
+    </header>
+
+    <section class="kpis">
+      <article class="card">
+        <div class="label">Active agents</div>
+        <div class="value" id="kpi-active">—</div>
+        <div class="hint" id="kpi-agents">Seen in the last 5 minutes</div>
+      </article>
+      <article class="card">
+        <div class="label">Usage count</div>
+        <div class="value" id="kpi-usage">—</div>
+        <div class="hint">Total ingested blips across agents</div>
+      </article>
+      <article class="card">
+        <div class="label">Remaining free-tier</div>
+        <div class="value" id="kpi-free">—</div>
+        <div class="hint" id="kpi-limit">Allowance remaining</div>
+      </article>
+      <article class="card">
+        <div class="label">x402 settlement</div>
+        <div class="value" id="kpi-x402">—</div>
+        <div class="hint" id="kpi-network">USDC micro-payments on Base</div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Connected agents</h2>
+          <span class="pill gold" id="protocol-pill">x402</span>
+        </div>
+        <div class="toast" id="admin-toast"></div>
+        <div id="agent-table">
+          <div class="empty">Waiting for telemetry…</div>
+        </div>
+      </div>
+
+      <div>
+        <div class="panel" style="margin-bottom: 16px;">
+          <div class="panel-head"><h2>Inspector</h2></div>
+          <div class="inspect">
+            <label for="agent-id">X-Agent-Id</label>
+            <div class="row">
+              <input id="agent-id" value="sdk-test-agent-001" spellcheck="false" />
+              <button type="button" id="inspect-btn">Fetch</button>
+            </div>
+            <div class="inspect-stats">
+              <div class="stat"><label>Usage</label><b id="ins-usage">—</b></div>
+              <div class="stat"><label>Remaining</label><b id="ins-remaining">—</b></div>
+              <div class="stat"><label>Payment</label><b id="ins-pay">—</b></div>
+              <div class="stat"><label>Price / blip</label><b id="ins-price">—</b></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Recent blips</h2></div>
+          <div class="feed" id="feed">
+            <div class="empty">No recent activity yet.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span>Worker <span id="footer-status">online</span> · GET /api/telemetry/overview</span>
+      <span id="footer-meta">protocol x402</span>
+    </footer>
+  </div>
+
+  <script>
+    const POLL_MS = 4000;
+    const ADMIN_KEY_STORAGE = 'agentblips.adminKey';
+    const agentInput = document.getElementById('agent-id');
+    const adminKeyInput = document.getElementById('admin-key');
+    adminKeyInput.value = sessionStorage.getItem(ADMIN_KEY_STORAGE) || '';
+
+    const fmt = (n) => Number(n ?? 0).toLocaleString();
+    const escapeHtml = (value) => String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;');
+
+    const rel = (iso) => {
+      if (!iso) return '—';
+      const delta = Date.now() - Date.parse(iso);
+      if (!Number.isFinite(delta)) return '—';
+      if (delta < 5000) return 'just now';
+      if (delta < 60000) return Math.floor(delta / 1000) + 's ago';
+      if (delta < 3600000) return Math.floor(delta / 60000) + 'm ago';
+      return Math.floor(delta / 3600000) + 'h ago';
+    };
+
+    function adminKey() {
+      return adminKeyInput.value.trim();
+    }
+
+    function setToast(message, isError = false) {
+      const toast = document.getElementById('admin-toast');
+      toast.textContent = message;
+      toast.classList.toggle('error', isError);
+    }
+
+    function pill(kind, text) {
+      return `<span class="pill ${kind}">${text}</span>`;
+    }
+
+    function renderAgents(overview) {
+      const agents = overview.agents || [];
+      const mount = document.getElementById('agent-table');
+      if (!agents.length) {
+        mount.innerHTML = '<div class="empty">No agents have ingested blips yet.</div>';
+        return;
+      }
+
+      const canAdmin = Boolean(adminKey());
+      mount.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>Agent</th>
+              <th>Status</th>
+              <th>Usage</th>
+              <th>Free remaining</th>
+              <th>Settlement</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${agents.map((agent) => {
+              const used = agent.freeTierLimit ? Math.min(100, (agent.usageCount / agent.freeTierLimit) * 100) : 0;
+              const status = agent.blocked
+                ? pill('alert', 'Blocked')
+                : agent.active
+                  ? pill('ok', 'Active')
+                  : pill('gold', 'Idle');
+              const settlement = agent.blocked
+                ? pill('alert', 'Blocked')
+                : agent.paymentRequired
+                  ? pill('warn', 'x402 required')
+                  : pill('ok', 'Free tier');
+              return `
+                <tr class="${agent.blocked ? 'blocked' : ''}">
+                  <td>
+                    <div class="mono">${escapeHtml(agent.agentId)}</div>
+                    <div style="color:var(--parchment-dim);font-size:0.75rem;margin-top:4px;">
+                      ${escapeHtml(agent.lastEvent || 'no events')} · ${rel(agent.lastSeen)} · limit ${fmt(agent.freeTierLimit)}
+                    </div>
+                  </td>
+                  <td>${status}</td>
+                  <td class="mono">${fmt(agent.usageCount)}</td>
+                  <td>
+                    <div class="mono">${fmt(agent.remainingFreeBlips)}</div>
+                    <div class="bar" style="margin-top:6px;"><span style="width:${used}%"></span></div>
+                  </td>
+                  <td>${settlement}</td>
+                  <td>
+                    <div class="actions">
+                      <button type="button" class="btn-ghost" data-action="reset" data-agent="${escapeHtml(agent.agentId)}" ${canAdmin ? '' : 'disabled'}>Reset</button>
+                      <button type="button" class="btn-ghost" data-action="set_limit" data-agent="${escapeHtml(agent.agentId)}" data-limit="${agent.freeTierLimit}" ${canAdmin ? '' : 'disabled'}>Limit</button>
+                      <button type="button" class="btn-danger" data-action="${agent.blocked ? 'unblock' : 'block'}" data-agent="${escapeHtml(agent.agentId)}" ${canAdmin ? '' : 'disabled'}>
+                        ${agent.blocked ? 'Unblock' : 'Block'}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function renderFeed(recent) {
+      const mount = document.getElementById('feed');
+      if (!recent?.length) {
+        mount.innerHTML = '<div class="empty">No recent activity yet.</div>';
+        return;
+      }
+      mount.innerHTML = recent.slice(0, 16).map((item) => `
+        <div class="feed-item">
+          <span class="mono" style="color:var(--parchment-dim)">${rel(item.ingestedAt)}</span>
+          <span><strong>${escapeHtml(item.event)}</strong><div class="mono" style="color:var(--parchment-dim);margin-top:3px;">${escapeHtml(item.agentId)}</div></span>
+          ${item.billingMode === 'paid' ? pill('warn', 'paid') : pill('ok', 'free')}
+        </div>
+      `).join('');
+    }
+
+    async function loadOverview() {
+      const response = await fetch('/api/telemetry/overview');
+      if (!response.ok) throw new Error('Overview request failed');
+      const data = await response.json();
+      const totals = data.totals || {};
+
+      document.getElementById('kpi-active').textContent = fmt(totals.activeAgents);
+      document.getElementById('kpi-usage').textContent = fmt(totals.usageCount);
+      document.getElementById('kpi-free').textContent = fmt(totals.remainingFreeBlips);
+      document.getElementById('kpi-x402').textContent = totals.paidAgents > 0 ? 'Required' : 'Standby';
+      document.getElementById('kpi-agents').textContent = `${fmt(totals.agents)} total · ${fmt(totals.blockedAgents || 0)} blocked`;
+      document.getElementById('kpi-limit').textContent = `${fmt(data.freeTierLimit)} default blips per agent`;
+      document.getElementById('kpi-network').textContent = `${data.pricePerBlip} USDC on ${data.network}`;
+      document.getElementById('protocol-pill').textContent = `${data.protocol} · ${data.network}`;
+      document.getElementById('footer-meta').textContent = `${data.protocol} · ${data.network} · ${data.pricePerBlip}/blip`;
+      document.getElementById('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      document.getElementById('pulse').classList.remove('offline');
+      document.getElementById('live-label').textContent = 'Live';
+
+      renderAgents(data);
+      renderFeed(data.recent);
+    }
+
+    async function inspectAgent() {
+      const agentId = agentInput.value.trim();
+      if (!agentId) return;
+      const response = await fetch('/api/telemetry/status', {
+        headers: { 'X-Agent-Id': agentId },
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        document.getElementById('ins-usage').textContent = '—';
+        document.getElementById('ins-remaining').textContent = '—';
+        document.getElementById('ins-pay').textContent = data.code || 'error';
+        document.getElementById('ins-price').textContent = '—';
+        return;
+      }
+      document.getElementById('ins-usage').textContent = fmt(data.usageCount);
+      document.getElementById('ins-remaining').textContent = fmt(data.remainingFreeBlips);
+      document.getElementById('ins-pay').textContent = data.blocked ? 'blocked' : data.paymentRequired ? 'x402' : 'free';
+      document.getElementById('ins-price').textContent = data.pricePerBlip;
+    }
+
+    async function adminAction(agentId, action, extra = {}) {
+      const key = adminKey();
+      if (!key) {
+        setToast('Enter an admin key to manage the fleet.', true);
+        return;
+      }
+
+      const response = await fetch('/api/admin/agent', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Agent-Id': agentId,
+          'X-Admin-Key': key,
+        },
+        body: JSON.stringify({ action, ...extra }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setToast(data.message || 'Admin action failed', true);
+        return;
+      }
+
+      setToast(`${agentId}: ${ (data.applied || [action]).join(', ') }`);
+      await tick();
+    }
+
+    async function tick() {
+      try {
+        await loadOverview();
+        await inspectAgent();
+      } catch (error) {
+        document.getElementById('pulse').classList.add('offline');
+        document.getElementById('live-label').textContent = 'Offline';
+        document.getElementById('updated').textContent = error instanceof Error ? error.message : 'Refresh failed';
+      }
+    }
+
+    document.getElementById('inspect-btn').addEventListener('click', inspectAgent);
+    agentInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') inspectAgent();
+    });
+    adminKeyInput.addEventListener('input', () => {
+      sessionStorage.setItem(ADMIN_KEY_STORAGE, adminKeyInput.value);
+      const enabled = Boolean(adminKey());
+      document.querySelectorAll('[data-action]').forEach((button) => {
+        button.disabled = !enabled;
+      });
+    });
+    document.getElementById('agent-table').addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-action]');
+      if (!button) return;
+      const agentId = button.dataset.agent;
+      const action = button.dataset.action;
+      if (!agentId || !action) return;
+
+      if (action === 'set_limit') {
+        const next = window.prompt(`New free-tier limit for ${agentId}`, button.dataset.limit || '100');
+        if (!next) return;
+        const parsed = Number.parseInt(next, 10);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          setToast('Limit must be a positive integer.', true);
+          return;
+        }
+        await adminAction(agentId, 'set_limit', { freeTierLimit: parsed });
+        return;
+      }
+
+      if (action === 'reset' && !window.confirm(`Reset usage for ${agentId}?`)) return;
+      if (action === 'block' && !window.confirm(`Block ${agentId} from ingesting telemetry?`)) return;
+      await adminAction(agentId, action);
+    });
+
+    tick();
+    setInterval(tick, POLL_MS);
+  </script>
+</body>
+</html>

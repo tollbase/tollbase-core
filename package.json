@@ -1,0 +1,24 @@
+{
+  "name": "agentblips-core",
+  "type": "module",
+  "main": "./src/client.ts",
+  "types": "./src/client.ts",
+  "exports": {
+    ".": "./src/client.ts"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --minify",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+  },
+  "dependencies": {
+    "hono": "^4.13.2",
+    "viem": "^2.55.16",
+    "x402": "^1.2.0",
+    "x402-hono": "^1.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "wrangler": "^4.123.0"
+  }
+}
