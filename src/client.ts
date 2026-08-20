@@ -1,4 +1,4 @@
-import { createPaymentHeader, selectPaymentRequirements } from 'x402/client';
+import { preparePaymentHeader, selectPaymentRequirements, signPaymentHeader } from 'x402/client';
 import type { Network, PaymentRequirements } from 'x402/types';
 import type { Hex, LocalAccount } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -189,6 +189,25 @@ export class AgentBlipsClient {
   }
 
   /**
+   * 32-byte EIP-3009 nonce from `crypto.getRandomValues`. Refuses to sign if
+   * a CSPRNG is not available (never falls back to Math.random).
+   */
+  private createSecureEip3009Nonce(): Hex {
+    const cryptoObj = globalThis.crypto;
+    if (!cryptoObj || typeof cryptoObj.getRandomValues !== 'function') {
+      throw new PaymentSigningError(
+        'Cannot generate EIP-3009 nonce: crypto.getRandomValues is unavailable.',
+      );
+    }
+    const bytes = cryptoObj.getRandomValues(new Uint8Array(32));
+    let hex = '0x';
+    for (let i = 0; i < bytes.length; i += 1) {
+      hex += bytes[i].toString(16).padStart(2, '0');
+    }
+    return hex as Hex;
+  }
+
+  /**
    * Select payment requirements from a 402 challenge and sign an EIP-3009
    * TransferWithAuthorization payload for the Base (or configured) network.
    */
@@ -210,8 +229,13 @@ export class AgentBlipsClient {
     );
 
     try {
-      return await createPaymentHeader(this.signer, challenge.x402Version, requirement);
+      const unsigned = preparePaymentHeader(this.signer.address, challenge.x402Version, requirement);
+      unsigned.payload.authorization.nonce = this.createSecureEip3009Nonce();
+      return await signPaymentHeader(this.signer, requirement, unsigned);
     } catch (error) {
+      if (error instanceof PaymentSigningError) {
+        throw error;
+      }
       throw new PaymentSigningError(
         error instanceof Error ? error.message : 'Failed to sign x402 payment header',
         error,

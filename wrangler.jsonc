@@ -25,6 +25,8 @@
 	],
 	"vars": {
 		"FREE_TIER_LIMIT": "100",
+		"PLATFORM_FREE_LIMIT": "5000",
+		"OWNER_ID": "default",
 		"TELEMETRY_PRICE": "$0.001",
 		"X402_NETWORK": "base",
 		"X402_FACILITATOR_URL": "https://x402.org/facilitator"

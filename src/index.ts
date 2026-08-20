@@ -22,12 +22,28 @@ import { useFacilitator } from 'x402/verify';
 // ---------------------------------------------------------------------------
 
 const DEFAULT_FREE_TIER_LIMIT = 100;
+const DEFAULT_PLATFORM_FREE_LIMIT = 5000;
+const DEFAULT_OWNER_ID = 'default';
 const DEFAULT_TELEMETRY_PRICE = '$0.001';
 const DEFAULT_X402_NETWORK: Network = 'base';
 const DEFAULT_FACILITATOR_URL = 'https://x402.org/facilitator';
 const X402_VERSION = 1;
 const LOW_BALANCE_THRESHOLD = 10;
 const ALERT_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+const KV_TIMEOUT_MS = 800;
+const KV_LIST_TIMEOUT_MS = 2000;
+const SUPABASE_TIMEOUT_MS = 1500;
+const MAX_TELEMETRY_BODY_BYTES = 32 * 1024;
+const MAX_PAYMENT_HEADER_BYTES = 8 * 1024;
+const MAX_EVENT_CHARS = 200;
+const PAYMENT_VALID_BEFORE_SKEW_SECONDS = 6;
+const PAYMENT_MAX_FUTURE_SECONDS = 3600;
+const RATE_LIMIT_WINDOW_SECONDS = 60;
+const DEFAULT_RATE_LIMIT_PER_AGENT = 120;
+const DEFAULT_RATE_LIMIT_PER_IP = 240;
+const PAYMENT_HEADER_CHARSET = /^[A-Za-z0-9+/_=-]+$/;
+const EIP3009_NONCE_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+const EVM_SIGNATURE_PATTERN = /^0x[0-9a-fA-F]{130,1024}$/;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +54,9 @@ interface Env {
   USAGE_KV: KVNamespace;
   X402_PAY_TO: string;
   ADMIN_SECRET?: string;
+  OWNER_ID?: string;
+  PLATFORM_FREE_LIMIT?: string;
+  SUBSCRIPTION_ACTIVE?: string;
   FREE_TIER_LIMIT?: string;
   TELEMETRY_PRICE?: string;
   X402_NETWORK?: string;
@@ -45,6 +64,8 @@ interface Env {
   SUPABASE_URL?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
   ALERT_WEBHOOK_URL?: string;
+  RATE_LIMIT_PER_AGENT?: string;
+  RATE_LIMIT_PER_IP?: string;
 }
 
 type BillingMode = 'free' | 'paid';
@@ -79,12 +100,26 @@ type UsageRecord = {
 };
 
 type AdminAction = 'reset' | 'set_limit' | 'block' | 'unblock';
+type OwnerAdminAction = 'subscribe' | 'unsubscribe' | 'reset_tracked';
 
 type AdminAgentBody = {
   action?: AdminAction;
   resetUsage?: boolean;
   freeTierLimit?: number | string;
   blocked?: boolean;
+};
+
+type AdminOwnerBody = {
+  action?: OwnerAdminAction;
+  subscriptionActive?: boolean;
+  resetTracked?: boolean;
+};
+
+type OwnerRecord = {
+  ownerId: string;
+  trackedBlips: number;
+  subscriptionActive?: boolean;
+  lastSeen?: string;
 };
 
 type ActivityEntry = {
@@ -95,13 +130,31 @@ type ActivityEntry = {
   ingestedAt: string;
   transactionHash?: string | null;
   success?: boolean;
+  errorCode?: string;
+  errorReason?: string;
+  status?: number;
 };
 
+type RevenueRecord = {
+  atomicAmount: string;
+  paidSettlements: number;
+  updatedAt: string;
+};
+
+type AppContext = Context<{ Bindings: Env; Variables: Variables }>;
+
 const ACTIVITY_KEY = 'activity:recent';
+const REJECTION_KEY = 'activity:rejections';
+const REVENUE_KEY = 'revenue:total';
 const ACTIVITY_LIMIT = 40;
 const ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 const IDEMPOTENCY_TTL_SECONDS = 60;
 const IDEMPOTENCY_HEADER_MAX = 200;
+const USDC_DECIMALS = 6;
+
+function ownerKey(ownerId: string): string {
+  return `owner:${ownerId}`;
+}
 
 type IdempotencyCache = {
   status: number;
@@ -117,6 +170,227 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function kvGetRaw(kv: KVNamespace, key: string): Promise<string | null> {
+  try {
+    return await withTimeout(kv.get(key), KV_TIMEOUT_MS, `kv.get:${key}`);
+  } catch (error) {
+    console.error('[kv] get failed:', error);
+    return null;
+  }
+}
+
+async function kvGetJson<T>(kv: KVNamespace, key: string): Promise<T | null> {
+  try {
+    const value = await withTimeout(kv.get<T>(key, 'json'), KV_TIMEOUT_MS, `kv.getJson:${key}`);
+    return value ?? null;
+  } catch (error) {
+    console.error('[kv] getJson failed:', error);
+    return null;
+  }
+}
+
+async function kvPutRaw(
+  kv: KVNamespace,
+  key: string,
+  value: string,
+  options?: KVNamespacePutOptions,
+): Promise<boolean> {
+  try {
+    await withTimeout(kv.put(key, value, options), KV_TIMEOUT_MS, `kv.put:${key}`);
+    return true;
+  } catch (error) {
+    console.error('[kv] put failed:', error);
+    return false;
+  }
+}
+
+function parseBooleanFlag(value: string | undefined): boolean | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes') return true;
+  if (normalized === 'false' || normalized === '0' || normalized === 'no') return false;
+  return undefined;
+}
+
+const localRateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function takeLocalRateToken(key: string, max: number, windowMs: number): boolean {
+  const now = Date.now();
+  if (localRateBuckets.size > 10_000) {
+    for (const [bucketKey, bucket] of localRateBuckets) {
+      if (now >= bucket.resetAt) localRateBuckets.delete(bucketKey);
+    }
+  }
+  const bucket = localRateBuckets.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    localRateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (bucket.count >= max) return false;
+  bucket.count += 1;
+  return true;
+}
+
+function clientIp(c: Context): string {
+  const cfIp = c.req.header('CF-Connecting-IP')?.trim();
+  if (cfIp) return cfIp;
+  const forwarded = c.req.header('X-Forwarded-For')?.split(',')[0]?.trim();
+  if (forwarded) return forwarded;
+  return 'unknown';
+}
+
+function rateLimitKvKey(scope: string, id: string): string {
+  const minute = Math.floor(Date.now() / (RATE_LIMIT_WINDOW_SECONDS * 1000));
+  return `rl:${scope}:${id}:${minute}`;
+}
+
+async function consumeKvRateLimit(kv: KVNamespace, key: string, max: number): Promise<boolean> {
+  const raw = await kvGetRaw(kv, key);
+  const current = Number.parseInt(raw ?? '0', 10);
+  const count = Number.isFinite(current) && current >= 0 ? current : 0;
+  if (count >= max) return false;
+  await kvPutRaw(kv, key, String(count + 1), { expirationTtl: RATE_LIMIT_WINDOW_SECONDS * 2 });
+  return true;
+}
+
+type PaymentAuthorization = {
+  from: string;
+  to: string;
+  value: string;
+  validAfter: string;
+  validBefore: string;
+  nonce: string;
+};
+
+function sanitizePaymentHeader(
+  raw: string,
+): { ok: true; value: string } | { ok: false; code: string; message: string } {
+  const value = raw.trim();
+  if (!value) {
+    return { ok: false, code: 'INVALID_PAYMENT', message: 'X-PAYMENT header is empty.' };
+  }
+  if (value.length > MAX_PAYMENT_HEADER_BYTES) {
+    return {
+      ok: false,
+      code: 'INVALID_PAYMENT',
+      message: `X-PAYMENT header exceeds ${MAX_PAYMENT_HEADER_BYTES} bytes.`,
+    };
+  }
+  if (value.includes('\n') || value.includes('\r') || value.includes(' ')) {
+    return { ok: false, code: 'INVALID_PAYMENT', message: 'X-PAYMENT header contains invalid whitespace.' };
+  }
+  if (!PAYMENT_HEADER_CHARSET.test(value)) {
+    return { ok: false, code: 'INVALID_PAYMENT', message: 'X-PAYMENT header is not valid base64.' };
+  }
+  return { ok: true, value };
+}
+
+function validatePaymentAuthorization(decoded: {
+  payload?: { signature?: string; authorization?: Partial<PaymentAuthorization> };
+}): { ok: true; authorization: PaymentAuthorization } | { ok: false; code: string; message: string } {
+  const authorization = decoded.payload?.authorization;
+  const signature = decoded.payload?.signature;
+  if (!authorization || typeof authorization !== 'object') {
+    return { ok: false, code: 'INVALID_PAYMENT', message: 'X-PAYMENT payload is missing authorization.' };
+  }
+  if (typeof signature !== 'string' || !EVM_SIGNATURE_PATTERN.test(signature)) {
+    return { ok: false, code: 'INVALID_PAYMENT', message: 'X-PAYMENT signature is malformed.' };
+  }
+
+  const nonce = typeof authorization.nonce === 'string' ? authorization.nonce : '';
+  if (!EIP3009_NONCE_PATTERN.test(nonce)) {
+    return { ok: false, code: 'INVALID_PAYMENT', message: 'EIP-3009 nonce must be a 32-byte hex value.' };
+  }
+
+  let from: string;
+  let to: string;
+  try {
+    from = getAddress(String(authorization.from));
+    to = getAddress(String(authorization.to));
+  } catch {
+    return { ok: false, code: 'INVALID_PAYMENT', message: 'X-PAYMENT authorization addresses are invalid.' };
+  }
+
+  let value: bigint;
+  let validAfter: bigint;
+  let validBefore: bigint;
+  try {
+    value = BigInt(String(authorization.value));
+    validAfter = BigInt(String(authorization.validAfter));
+    validBefore = BigInt(String(authorization.validBefore));
+  } catch {
+    return {
+      ok: false,
+      code: 'INVALID_PAYMENT',
+      message: 'X-PAYMENT authorization numeric fields are invalid.',
+    };
+  }
+
+  if (value <= 0n) {
+    return { ok: false, code: 'INVALID_PAYMENT', message: 'X-PAYMENT authorization value must be positive.' };
+  }
+  if (validBefore <= validAfter) {
+    return {
+      ok: false,
+      code: 'INVALID_PAYMENT',
+      message: 'X-PAYMENT validBefore must be after validAfter.',
+    };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (validAfter > BigInt(now)) {
+    return {
+      ok: false,
+      code: 'PAYMENT_NOT_YET_VALID',
+      message: 'X-PAYMENT authorization validAfter is still in the future.',
+    };
+  }
+  if (validBefore < BigInt(now + PAYMENT_VALID_BEFORE_SKEW_SECONDS)) {
+    return {
+      ok: false,
+      code: 'PAYMENT_EXPIRED',
+      message: 'X-PAYMENT authorization validBefore has expired.',
+    };
+  }
+  if (validBefore > BigInt(now + PAYMENT_MAX_FUTURE_SECONDS)) {
+    return {
+      ok: false,
+      code: 'INVALID_PAYMENT',
+      message: 'X-PAYMENT authorization validBefore is too far in the future.',
+    };
+  }
+
+  return {
+    ok: true,
+    authorization: {
+      from,
+      to,
+      value: value.toString(),
+      validAfter: validAfter.toString(),
+      validBefore: validBefore.toString(),
+      nonce,
+    },
+  };
 }
 
 function resolveAgentId(c: Context<{ Bindings: Env; Variables: Variables }>): string | null {
@@ -153,17 +427,88 @@ function parseUsageRecord(raw: string | null): UsageRecord {
 }
 
 async function getUsageRecord(kv: KVNamespace, agentId: string): Promise<UsageRecord> {
-  return parseUsageRecord(await kv.get(usageKey(agentId)));
+  return parseUsageRecord(await kvGetRaw(kv, usageKey(agentId)));
 }
 
 function defaultFreeTierLimit(env: Env): number {
   return parsePositiveInt(env.FREE_TIER_LIMIT, DEFAULT_FREE_TIER_LIMIT);
 }
 
+function defaultPlatformFreeLimit(env: Env): number {
+  return parsePositiveInt(env.PLATFORM_FREE_LIMIT, DEFAULT_PLATFORM_FREE_LIMIT);
+}
+
 function resolveAgentFreeTierLimit(record: UsageRecord, env: Env): number {
   return record.freeTierLimit && record.freeTierLimit > 0
     ? record.freeTierLimit
     : defaultFreeTierLimit(env);
+}
+
+function resolveOwnerId(c: Context<{ Bindings: Env }>): string {
+  const headerId = c.req.header('X-Owner-Id')?.trim();
+  if (headerId) return headerId;
+  const envId = c.env.OWNER_ID?.trim();
+  if (envId) return envId;
+  return DEFAULT_OWNER_ID;
+}
+
+function parseOwnerRecord(ownerId: string, raw: string | null): OwnerRecord {
+  if (!raw) return { ownerId, trackedBlips: 0 };
+  try {
+    const parsed = JSON.parse(raw) as OwnerRecord;
+    const trackedBlips = Number(parsed.trackedBlips);
+    return {
+      ownerId,
+      trackedBlips: Number.isFinite(trackedBlips) && trackedBlips >= 0 ? trackedBlips : 0,
+      subscriptionActive:
+        parsed.subscriptionActive === true ? true : parsed.subscriptionActive === false ? false : undefined,
+      lastSeen: typeof parsed.lastSeen === 'string' ? parsed.lastSeen : undefined,
+    };
+  } catch {
+    return { ownerId, trackedBlips: 0 };
+  }
+}
+
+async function getOwnerRecord(kv: KVNamespace, ownerId: string): Promise<OwnerRecord> {
+  return parseOwnerRecord(ownerId, await kvGetRaw(kv, ownerKey(ownerId)));
+}
+
+async function putOwnerRecord(kv: KVNamespace, record: OwnerRecord): Promise<boolean> {
+  return kvPutRaw(kv, ownerKey(record.ownerId), JSON.stringify(record));
+}
+
+function resolveSubscriptionActive(record: OwnerRecord, env: Env): boolean {
+  if (record.subscriptionActive === true) return true;
+  if (record.subscriptionActive === false) return false;
+  return parseBooleanFlag(env.SUBSCRIPTION_ACTIVE) === true;
+}
+
+function serializeOwnerSnapshot(record: OwnerRecord, env: Env) {
+  const freeLimit = defaultPlatformFreeLimit(env);
+  const subscriptionActive = resolveSubscriptionActive(record, env);
+  const remainingFreeTracked = Math.max(freeLimit - record.trackedBlips, 0);
+  const upgradeRequired = !subscriptionActive && record.trackedBlips >= freeLimit;
+  return {
+    ownerId: record.ownerId,
+    trackedBlips: record.trackedBlips,
+    freeLimit,
+    remainingFreeTracked,
+    subscriptionActive,
+    upgradeRequired,
+    hudLive: !upgradeRequired,
+  };
+}
+
+async function incrementOwnerTracked(kv: KVNamespace, ownerId: string): Promise<OwnerRecord> {
+  const current = await getOwnerRecord(kv, ownerId);
+  const next: OwnerRecord = {
+    ...current,
+    ownerId,
+    trackedBlips: current.trackedBlips + 1,
+    lastSeen: new Date().toISOString(),
+  };
+  await putOwnerRecord(kv, next);
+  return next;
 }
 
 async function secretsMatch(provided: string, expected: string): Promise<boolean> {
@@ -192,13 +537,43 @@ function resolveAdminSecret(c: Context<{ Bindings: Env }>): string | null {
   return null;
 }
 
+async function requireAdmin(
+  c: Context<{ Bindings: Env }>,
+): Promise<Response | null> {
+  const expected = c.env.ADMIN_SECRET?.trim();
+  if (!expected) {
+    return c.json(
+      {
+        status: 'error',
+        code: 'ADMIN_SECRET_MISSING',
+        message: 'ADMIN_SECRET is not configured on the worker.',
+      },
+      503,
+    );
+  }
+
+  const provided = resolveAdminSecret(c);
+  if (!provided || !(await secretsMatch(provided, expected))) {
+    return c.json(
+      {
+        status: 'error',
+        code: 'ADMIN_UNAUTHORIZED',
+        message: 'Provide a valid admin credential via the X-Admin-Key header.',
+      },
+      401,
+    );
+  }
+
+  return null;
+}
+
 async function getUsageCount(kv: KVNamespace, agentId: string): Promise<number> {
   const record = await getUsageRecord(kv, agentId);
   return record.count;
 }
 
 async function putUsageRecord(kv: KVNamespace, agentId: string, record: UsageRecord): Promise<void> {
-  await kv.put(usageKey(agentId), JSON.stringify(record));
+  await kvPutRaw(kv, usageKey(agentId), JSON.stringify(record));
 }
 
 async function incrementUsageCount(kv: KVNamespace, agentId: string): Promise<number> {
@@ -266,7 +641,7 @@ async function maybeSendLowBalanceAlert(params: {
   }
 
   try {
-    const previous = await env.USAGE_KV.get(lastAlertKey(agentId));
+    const previous = await kvGetRaw(env.USAGE_KV, lastAlertKey(agentId));
     if (previous) {
       const lastAlertAt = Date.parse(previous);
       if (Number.isFinite(lastAlertAt) && Date.now() - lastAlertAt < ALERT_COOLDOWN_MS) {
@@ -301,7 +676,7 @@ async function maybeSendLowBalanceAlert(params: {
       return;
     }
 
-    await env.USAGE_KV.put(lastAlertKey(agentId), alertedAt, {
+    await kvPutRaw(env.USAGE_KV, lastAlertKey(agentId), alertedAt, {
       expirationTtl: Math.ceil(ALERT_COOLDOWN_MS / 1000),
     });
   } catch (error) {
@@ -309,19 +684,72 @@ async function maybeSendLowBalanceAlert(params: {
   }
 }
 
-async function appendActivity(kv: KVNamespace, entry: ActivityEntry): Promise<void> {
-  const raw = await kv.get(ACTIVITY_KEY);
-  let recent: ActivityEntry[] = [];
-  if (raw) {
-    try {
-      recent = JSON.parse(raw) as ActivityEntry[];
-      if (!Array.isArray(recent)) recent = [];
-    } catch {
-      recent = [];
-    }
+function parseAtomicAmount(value: string | undefined): bigint {
+  if (!value) return 0n;
+  try {
+    return BigInt(value);
+  } catch {
+    return 0n;
   }
-  recent.unshift({ ...entry, success: true });
-  await kv.put(ACTIVITY_KEY, JSON.stringify(recent.slice(0, ACTIVITY_LIMIT)));
+}
+
+function formatAtomicUsdc(atomic: string, decimals = USDC_DECIMALS): string {
+  const negative = atomic.startsWith('-');
+  const digits = (negative ? atomic.slice(1) : atomic).replace(/^0+/, '') || '0';
+  const padded = digits.padStart(decimals + 1, '0');
+  const whole = padded.slice(0, -decimals);
+  const frac = padded.slice(-decimals).replace(/0+$/, '');
+  const formatted = frac.length > 0 ? `${whole}.${frac}` : whole;
+  return negative ? `-${formatted}` : formatted;
+}
+
+function emptyRevenue(): RevenueRecord {
+  return { atomicAmount: '0', paidSettlements: 0, updatedAt: new Date().toISOString() };
+}
+
+async function readRevenue(kv: KVNamespace): Promise<RevenueRecord> {
+  const raw = await kvGetRaw(kv, REVENUE_KEY);
+  if (!raw) return emptyRevenue();
+  try {
+    const parsed = JSON.parse(raw) as RevenueRecord;
+    const paidSettlements = Number(parsed.paidSettlements);
+    return {
+      atomicAmount: parseAtomicAmount(parsed.atomicAmount).toString(),
+      paidSettlements: Number.isFinite(paidSettlements) && paidSettlements >= 0 ? paidSettlements : 0,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : emptyRevenue().updatedAt,
+    };
+  } catch {
+    return emptyRevenue();
+  }
+}
+
+async function incrementRevenue(kv: KVNamespace, atomicDelta: string): Promise<RevenueRecord> {
+  const current = await readRevenue(kv);
+  const next: RevenueRecord = {
+    atomicAmount: (parseAtomicAmount(current.atomicAmount) + parseAtomicAmount(atomicDelta)).toString(),
+    paidSettlements: current.paidSettlements + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  await kvPutRaw(kv, REVENUE_KEY, JSON.stringify(next));
+  return next;
+}
+
+async function readActivityList(kv: KVNamespace, key: string): Promise<ActivityEntry[]> {
+  const raw = await kvGetRaw(kv, key);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as ActivityEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function appendActivity(kv: KVNamespace, entry: ActivityEntry): Promise<void> {
+  const key = entry.success === false ? REJECTION_KEY : ACTIVITY_KEY;
+  const recent = await readActivityList(kv, key);
+  recent.unshift({ ...entry, success: entry.success !== false });
+  await kvPutRaw(kv, key, JSON.stringify(recent.slice(0, ACTIVITY_LIMIT)));
 }
 
 async function attachActivityTransaction(
@@ -329,47 +757,112 @@ async function attachActivityTransaction(
   blipId: string,
   transactionHash: string,
 ): Promise<void> {
-  const raw = await kv.get(ACTIVITY_KEY);
-  if (!raw) return;
-  try {
-    const recent = JSON.parse(raw) as ActivityEntry[];
-    if (!Array.isArray(recent)) return;
-    const index = recent.findIndex((entry) => entry.blipId === blipId);
-    if (index < 0) return;
-    recent[index] = { ...recent[index], transactionHash };
-    await kv.put(ACTIVITY_KEY, JSON.stringify(recent));
-  } catch {
-    // Activity log is best-effort; ingest already succeeded.
-  }
+  const recent = await readActivityList(kv, ACTIVITY_KEY);
+  const index = recent.findIndex((entry) => entry.blipId === blipId);
+  if (index < 0) return;
+  recent[index] = { ...recent[index], transactionHash };
+  await kvPutRaw(kv, ACTIVITY_KEY, JSON.stringify(recent));
+}
+
+async function moveActivityToRejection(
+  kv: KVNamespace,
+  blipId: string,
+  errorCode: string,
+  errorReason: string,
+): Promise<void> {
+  const recent = await readActivityList(kv, ACTIVITY_KEY);
+  const index = recent.findIndex((entry) => entry.blipId === blipId);
+  if (index < 0) return;
+  const [entry] = recent.splice(index, 1);
+  await kvPutRaw(kv, ACTIVITY_KEY, JSON.stringify(recent));
+  await appendActivity(kv, {
+    ...entry,
+    success: false,
+    errorCode,
+    errorReason,
+    status: 402,
+  });
 }
 
 async function readRecentActivity(kv: KVNamespace): Promise<ActivityEntry[]> {
-  const raw = await kv.get(ACTIVITY_KEY);
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as ActivityEntry[];
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((entry) => entry.success !== false);
-  } catch {
-    return [];
-  }
+  return (await readActivityList(kv, ACTIVITY_KEY)).filter((entry) => entry.success !== false);
+}
+
+async function readRecentRejections(kv: KVNamespace): Promise<ActivityEntry[]> {
+  return (await readActivityList(kv, REJECTION_KEY)).filter((entry) => entry.success === false);
+}
+
+function resolveRejectionEvent(c: AppContext): string {
+  const body = c.get('telemetryBody');
+  return body && typeof body.event === 'string' && body.event.length > 0 ? body.event : 'telemetry';
+}
+
+function scheduleRejectionLog(
+  c: AppContext,
+  params: { code: string; message: string; agentId?: string },
+): void {
+  const agentId = params.agentId ?? c.get('agentId') ?? resolveAgentId(c);
+  if (!agentId) return;
+  const entry: ActivityEntry = {
+    blipId: crypto.randomUUID(),
+    agentId,
+    event: resolveRejectionEvent(c),
+    billingMode: 'paid',
+    ingestedAt: new Date().toISOString(),
+    transactionHash: null,
+    success: false,
+    errorCode: params.code,
+    errorReason: params.message,
+    status: 402,
+  };
+  c.executionCtx.waitUntil(
+    appendActivity(c.env.USAGE_KV, entry).catch((error) => {
+      console.error('[activity] failed to log rejection:', error);
+    }),
+  );
+}
+
+function paymentRequiredResponse(
+  c: AppContext,
+  body: {
+    status: 'payment_required';
+    code: string;
+    message: string;
+    agentId?: string;
+    usageCount?: number;
+    freeTierLimit?: number;
+    x402Version: number;
+    accepts: unknown;
+    payer?: string;
+  },
+) {
+  scheduleRejectionLog(c, { code: body.code, message: body.message, agentId: body.agentId });
+  return c.json(body, 402);
 }
 
 async function listAgentUsage(kv: KVNamespace): Promise<Array<{ agentId: string; record: UsageRecord }>> {
   const agents: Array<{ agentId: string; record: UsageRecord }> = [];
   let cursor: string | undefined;
 
-  do {
-    const page = await kv.list({ prefix: 'usage:', cursor });
-    const records = await Promise.all(
-      page.keys.map(async (key) => {
-        const agentId = key.name.slice('usage:'.length);
-        return { agentId, record: parseUsageRecord(await kv.get(key.name)) };
-      }),
-    );
-    agents.push(...records);
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
+  try {
+    do {
+      const page = await withTimeout(
+        kv.list({ prefix: 'usage:', cursor }),
+        KV_LIST_TIMEOUT_MS,
+        'kv.list:usage',
+      );
+      const records = await Promise.all(
+        page.keys.map(async (key) => {
+          const agentId = key.name.slice('usage:'.length);
+          return { agentId, record: parseUsageRecord(await kvGetRaw(kv, key.name)) };
+        }),
+      );
+      agents.push(...records);
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+  } catch (error) {
+    console.error('[kv] list usage failed:', error);
+  }
 
   return agents;
 }
@@ -439,8 +932,8 @@ async function persistTelemetryBlip(
   agentId: string,
   blip: TelemetryBlip,
   billingMode: BillingMode,
+  blipId = crypto.randomUUID(),
 ): Promise<{ blipId: string; persisted: boolean }> {
-  const blipId = crypto.randomUUID();
   const record = {
     id: blipId,
     agent_id: agentId,
@@ -458,23 +951,35 @@ async function persistTelemetryBlip(
     return { blipId, persisted: false };
   }
 
-  const response = await fetch(`${env.SUPABASE_URL}/rest/v1/telemetry_blips`, {
-    method: 'POST',
-    headers: {
-      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-      'Content-Type': 'application/json',
-      Prefer: 'return=minimal',
-    },
-    body: JSON.stringify(record),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SUPABASE_TIMEOUT_MS);
 
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`Supabase ingest failed (${response.status}): ${detail}`);
+  try {
+    const response = await fetch(`${env.SUPABASE_URL}/rest/v1/telemetry_blips`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify(record),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      console.error('[telemetry] supabase ingest failed:', response.status, detail);
+      return { blipId, persisted: false };
+    }
+
+    return { blipId, persisted: true };
+  } catch (error) {
+    console.error('[telemetry] supabase ingest failed:', error);
+    return { blipId, persisted: false };
+  } finally {
+    clearTimeout(timer);
   }
-
-  return { blipId, persisted: true };
 }
 
 function idempotencyKvKey(agentId: string, key: string): string {
@@ -517,6 +1022,64 @@ function replayIdempotentResponse(cache: IdempotencyCache): Response {
   return response;
 }
 
+function createTelemetryAbuseGate(): MiddlewareHandler<{
+  Bindings: Env;
+  Variables: Variables;
+}> {
+  return async (c, next) => {
+    const perAgent = parsePositiveInt(c.env.RATE_LIMIT_PER_AGENT, DEFAULT_RATE_LIMIT_PER_AGENT);
+    const perIp = parsePositiveInt(c.env.RATE_LIMIT_PER_IP, DEFAULT_RATE_LIMIT_PER_IP);
+    const windowMs = RATE_LIMIT_WINDOW_SECONDS * 1000;
+    const ip = clientIp(c);
+    const agentId = resolveAgentId(c) ?? 'anonymous';
+
+    if (!takeLocalRateToken(`ip:${ip}`, perIp, windowMs) || !takeLocalRateToken(`agent:${agentId}`, perAgent, windowMs)) {
+      c.header('Retry-After', String(RATE_LIMIT_WINDOW_SECONDS));
+      return c.json(
+        {
+          status: 'error',
+          code: 'RATE_LIMITED',
+          message: `Too many telemetry requests. Retry after ${RATE_LIMIT_WINDOW_SECONDS} seconds.`,
+        },
+        429,
+      );
+    }
+
+    const [ipAllowed, agentAllowed] = await Promise.all([
+      consumeKvRateLimit(c.env.USAGE_KV, rateLimitKvKey('ip', ip), perIp),
+      consumeKvRateLimit(c.env.USAGE_KV, rateLimitKvKey('agent', agentId), perAgent),
+    ]);
+    if (!ipAllowed || !agentAllowed) {
+      c.header('Retry-After', String(RATE_LIMIT_WINDOW_SECONDS));
+      return c.json(
+        {
+          status: 'error',
+          code: 'RATE_LIMITED',
+          message: `Too many telemetry requests. Retry after ${RATE_LIMIT_WINDOW_SECONDS} seconds.`,
+        },
+        429,
+      );
+    }
+
+    const contentLengthHeader = c.req.header('Content-Length');
+    if (contentLengthHeader) {
+      const contentLength = Number.parseInt(contentLengthHeader, 10);
+      if (Number.isFinite(contentLength) && contentLength > MAX_TELEMETRY_BODY_BYTES) {
+        return c.json(
+          {
+            status: 'error',
+            code: 'PAYLOAD_TOO_LARGE',
+            message: `Telemetry body exceeds ${MAX_TELEMETRY_BODY_BYTES} bytes.`,
+          },
+          413,
+        );
+      }
+    }
+
+    return next();
+  };
+}
+
 function createTelemetryIdempotencyGate(): MiddlewareHandler<{
   Bindings: Env;
   Variables: Variables;
@@ -532,6 +1095,17 @@ function createTelemetryIdempotencyGate(): MiddlewareHandler<{
       rawBody = await c.req.text();
     } catch {
       return next();
+    }
+
+    if (new TextEncoder().encode(rawBody).byteLength > MAX_TELEMETRY_BODY_BYTES) {
+      return c.json(
+        {
+          status: 'error',
+          code: 'PAYLOAD_TOO_LARGE',
+          message: `Telemetry body exceeds ${MAX_TELEMETRY_BODY_BYTES} bytes.`,
+        },
+        413,
+      );
     }
 
     let body: TelemetryBlip;
@@ -559,9 +1133,9 @@ function createTelemetryIdempotencyGate(): MiddlewareHandler<{
     );
     c.set('idempotencyKey', idempotencyKey);
 
-    const cache = await c.env.USAGE_KV.get<IdempotencyCache>(
+    const cache = await kvGetJson<IdempotencyCache>(
+      c.env.USAGE_KV,
       idempotencyKvKey(agentId, idempotencyKey),
-      'json',
     );
     if (cache && typeof cache.status === 'number' && cache.status < 400) {
       return replayIdempotentResponse(cache);
@@ -581,7 +1155,7 @@ function createTelemetryIdempotencyGate(): MiddlewareHandler<{
         body: payload,
         paymentResponse: response.headers.get('X-PAYMENT-RESPONSE') ?? undefined,
       };
-      await c.env.USAGE_KV.put(idempotencyKvKey(agentId, idempotencyKey), JSON.stringify(record), {
+      await kvPutRaw(c.env.USAGE_KV, idempotencyKvKey(agentId, idempotencyKey), JSON.stringify(record), {
         expirationTtl: IDEMPOTENCY_TTL_SECONDS,
       });
     } catch (error) {
@@ -633,8 +1207,13 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
 
     // Free allowance still available — increment and bypass x402.
     if (usageCount < freeTierLimit) {
-      const updatedCount = await incrementUsageCount(c.env.USAGE_KV, agentId);
-      c.set('usageCount', updatedCount);
+      try {
+        const updatedCount = await incrementUsageCount(c.env.USAGE_KV, agentId);
+        c.set('usageCount', updatedCount);
+      } catch (error) {
+        console.error('[kv] usage increment failed:', error);
+        c.set('usageCount', usageCount + 1);
+      }
       c.set('billingMode', 'free');
       return next();
     }
@@ -671,39 +1250,55 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
     }
 
     const paymentRequirements = requirementsResult;
-    const paymentHeader = c.req.header('X-PAYMENT');
+    const paymentHeaderRaw = c.req.header('X-PAYMENT');
 
-    if (!paymentHeader) {
-      return c.json(
-        {
-          status: 'payment_required',
-          code: 'FREE_TIER_EXHAUSTED',
-          message: `Free telemetry allowance exhausted (${freeTierLimit} blips). Retry with an X-PAYMENT header to settle ${price} USDC on ${network}.`,
-          agentId,
-          usageCount,
-          freeTierLimit,
-          x402Version: X402_VERSION,
-          accepts: paymentRequirements,
-        },
-        402,
-      );
+    if (!paymentHeaderRaw) {
+      return paymentRequiredResponse(c, {
+        status: 'payment_required',
+        code: 'FREE_TIER_EXHAUSTED',
+        message: `Free telemetry allowance exhausted (${freeTierLimit} blips). Retry with an X-PAYMENT header to settle ${price} USDC on ${network}.`,
+        agentId,
+        usageCount,
+        freeTierLimit,
+        x402Version: X402_VERSION,
+        accepts: paymentRequirements,
+      });
+    }
+
+    const sanitizedHeader = sanitizePaymentHeader(paymentHeaderRaw);
+    if (!sanitizedHeader.ok) {
+      return paymentRequiredResponse(c, {
+        status: 'payment_required',
+        code: sanitizedHeader.code,
+        message: sanitizedHeader.message,
+        x402Version: X402_VERSION,
+        accepts: paymentRequirements,
+      });
     }
 
     let decodedPayment;
     try {
-      decodedPayment = exact.evm.decodePayment(paymentHeader);
+      decodedPayment = exact.evm.decodePayment(sanitizedHeader.value);
       decodedPayment.x402Version = X402_VERSION;
     } catch (error) {
-      return c.json(
-        {
-          status: 'payment_required',
-          code: 'INVALID_PAYMENT',
-          message: error instanceof Error ? error.message : 'Invalid or malformed X-PAYMENT header',
-          x402Version: X402_VERSION,
-          accepts: paymentRequirements,
-        },
-        402,
-      );
+      return paymentRequiredResponse(c, {
+        status: 'payment_required',
+        code: 'INVALID_PAYMENT',
+        message: error instanceof Error ? error.message : 'Invalid or malformed X-PAYMENT header',
+        x402Version: X402_VERSION,
+        accepts: paymentRequirements,
+      });
+    }
+
+    const authorizationCheck = validatePaymentAuthorization(decodedPayment);
+    if (!authorizationCheck.ok) {
+      return paymentRequiredResponse(c, {
+        status: 'payment_required',
+        code: authorizationCheck.code,
+        message: authorizationCheck.message,
+        x402Version: X402_VERSION,
+        accepts: paymentRequirements,
+      });
     }
 
     const selectedRequirements = findMatchingPaymentRequirements(
@@ -712,16 +1307,13 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
     );
 
     if (!selectedRequirements) {
-      return c.json(
-        {
-          status: 'payment_required',
-          code: 'NO_MATCHING_REQUIREMENTS',
-          message: 'Unable to find matching payment requirements for the supplied X-PAYMENT header.',
-          x402Version: X402_VERSION,
-          accepts: toJsonSafe(paymentRequirements),
-        },
-        402,
-      );
+      return paymentRequiredResponse(c, {
+        status: 'payment_required',
+        code: 'NO_MATCHING_REQUIREMENTS',
+        message: 'Unable to find matching payment requirements for the supplied X-PAYMENT header.',
+        x402Version: X402_VERSION,
+        accepts: toJsonSafe(paymentRequirements),
+      });
     }
 
     const { verify, settle } = useFacilitator({ url: facilitatorUrl });
@@ -729,30 +1321,24 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
     try {
       const verification = await verify(decodedPayment, selectedRequirements);
       if (!verification.isValid) {
-        return c.json(
-          {
-            status: 'payment_required',
-            code: 'VERIFICATION_FAILED',
-            message: verification.invalidReason ?? 'Payment verification failed',
-            payer: verification.payer,
-            x402Version: X402_VERSION,
-            accepts: paymentRequirements,
-          },
-          402,
-        );
+        return paymentRequiredResponse(c, {
+          status: 'payment_required',
+          code: 'VERIFICATION_FAILED',
+          message: verification.invalidReason ?? 'Payment verification failed',
+          payer: typeof verification.payer === 'string' ? verification.payer : undefined,
+          x402Version: X402_VERSION,
+          accepts: paymentRequirements,
+        });
       }
     } catch (error) {
       console.error('[x402] verification error:', error);
-      return c.json(
-        {
-          status: 'payment_required',
-          code: 'VERIFICATION_ERROR',
-          message: error instanceof Error ? error.message : 'Payment verification failed',
-          x402Version: X402_VERSION,
-          accepts: paymentRequirements,
-        },
-        402,
-      );
+      return paymentRequiredResponse(c, {
+        status: 'payment_required',
+        code: 'VERIFICATION_ERROR',
+        message: error instanceof Error ? error.message : 'Payment verification failed',
+        x402Version: X402_VERSION,
+        accepts: paymentRequirements,
+      });
     }
 
     await next();
@@ -775,15 +1361,46 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
 
       const blipId = c.get('blipId');
       const transactionHash = typeof settlement.transaction === 'string' ? settlement.transaction : '';
-      if (blipId && transactionHash) {
-        c.executionCtx.waitUntil(attachActivityTransaction(c.env.USAGE_KV, blipId, transactionHash));
-      }
+      const atomicAmount = processPriceToAtomicAmount(price, network);
+      c.executionCtx.waitUntil(
+        Promise.all([
+          blipId && transactionHash
+            ? attachActivityTransaction(c.env.USAGE_KV, blipId, transactionHash)
+            : Promise.resolve(),
+          !('error' in atomicAmount)
+            ? incrementRevenue(c.env.USAGE_KV, String(atomicAmount.maxAmountRequired))
+            : Promise.resolve(),
+        ]).catch((error) => {
+          console.error('[x402] post-settlement bookkeeping failed:', error);
+        }),
+      );
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to settle payment on-chain';
+      const blipId = c.get('blipId');
+      c.executionCtx.waitUntil(
+        (blipId
+          ? moveActivityToRejection(c.env.USAGE_KV, blipId, 'SETTLEMENT_FAILED', message)
+          : appendActivity(c.env.USAGE_KV, {
+              blipId: crypto.randomUUID(),
+              agentId,
+              event: resolveRejectionEvent(c),
+              billingMode: 'paid',
+              ingestedAt: new Date().toISOString(),
+              transactionHash: null,
+              success: false,
+              errorCode: 'SETTLEMENT_FAILED',
+              errorReason: message,
+              status: 402,
+            })
+        ).catch((logError) => {
+          console.error('[activity] failed to log settlement failure:', logError);
+        }),
+      );
       c.res = c.json(
         {
           status: 'payment_required',
           code: 'SETTLEMENT_FAILED',
-          message: error instanceof Error ? error.message : 'Failed to settle payment on-chain',
+          message,
           x402Version: X402_VERSION,
           accepts: paymentRequirements,
         },
@@ -804,7 +1421,7 @@ app.use(
   cors({
     origin: '*',
     allowMethods: ['GET', 'POST', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'X-Agent-Id', 'X-PAYMENT', 'X-Admin-Key', 'Authorization', 'X-Idempotency-Key'],
+    allowHeaders: ['Content-Type', 'X-Agent-Id', 'X-Owner-Id', 'X-PAYMENT', 'X-Admin-Key', 'Authorization', 'X-Idempotency-Key'],
     exposeHeaders: ['X-PAYMENT-RESPONSE', 'X-Idempotency-Replayed'],
   }),
 );
@@ -821,6 +1438,7 @@ app.get('/api', (c) => {
       telemetryOverview: 'GET /api/telemetry/overview',
       telemetryActivity: 'GET /api/telemetry/activity',
       adminAgent: 'POST /api/admin/agent',
+      adminOwner: 'POST /api/admin/owner',
     },
   });
 });
@@ -865,6 +1483,10 @@ app.get('/api/telemetry/overview', async (c) => {
   });
 
   const recent = await readRecentActivity(c.env.USAGE_KV);
+  const rejections = await readRecentRejections(c.env.USAGE_KV);
+  const revenue = await readRevenue(c.env.USAGE_KV);
+  const owner = await getOwnerRecord(c.env.USAGE_KV, resolveOwnerId(c));
+  const platform = serializeOwnerSnapshot(owner, c.env);
 
   const activeAgents = agents.filter((agent) => agent.active).length;
   const usageCount = agents.reduce((sum, agent) => sum + agent.usageCount, 0);
@@ -881,6 +1503,7 @@ app.get('/api/telemetry/overview', async (c) => {
     network,
     pricePerBlip,
     freeTierLimit,
+    platform,
     totals: {
       agents: agents.length,
       activeAgents,
@@ -889,20 +1512,35 @@ app.get('/api/telemetry/overview', async (c) => {
       paidAgents,
       blockedAgents,
       settlementStatus: paidAgents > 0 ? 'x402_required' : 'free_tier',
+      revenueUsdc: formatAtomicUsdc(revenue.atomicAmount),
+      revenueAtomic: revenue.atomicAmount,
+      paidSettlements: revenue.paidSettlements,
+      trackedBlips: platform.trackedBlips,
     },
-    agents,
-    recent,
+    agents: platform.hudLive ? agents : [],
+    recent: platform.hudLive ? recent : [],
+    rejections: platform.hudLive ? rejections : [],
   });
 });
 
 app.get('/api/telemetry/activity', async (c) => {
   const limit = parsePositiveInt(c.req.query('limit'), 25);
-  const events = (await readRecentActivity(c.env.USAGE_KV)).slice(0, Math.min(limit, ACTIVITY_LIMIT));
+  const cap = Math.min(limit, ACTIVITY_LIMIT);
+  const owner = await getOwnerRecord(c.env.USAGE_KV, resolveOwnerId(c));
+  const platform = serializeOwnerSnapshot(owner, c.env);
+  const events = platform.hudLive
+    ? (await readRecentActivity(c.env.USAGE_KV)).slice(0, cap)
+    : [];
+  const rejections = platform.hudLive
+    ? (await readRecentRejections(c.env.USAGE_KV)).slice(0, cap)
+    : [];
   return c.json({
     status: 'success',
     protocol: 'x402',
     network: c.env.X402_NETWORK ?? DEFAULT_X402_NETWORK,
+    platform,
     events,
+    rejections,
   });
 });
 
@@ -937,7 +1575,7 @@ app.get('/api/telemetry/status', async (c) => {
   });
 });
 
-app.post('/api/telemetry', createTelemetryIdempotencyGate(), createTelemetryPaymentGate(), async (c) => {
+app.post('/api/telemetry', createTelemetryAbuseGate(), createTelemetryIdempotencyGate(), createTelemetryPaymentGate(), async (c) => {
   const body = c.get('telemetryBody');
   if (!body) {
     return c.json(
@@ -950,12 +1588,12 @@ app.post('/api/telemetry', createTelemetryIdempotencyGate(), createTelemetryPaym
     );
   }
 
-  if (!body.event || typeof body.event !== 'string') {
+  if (!body.event || typeof body.event !== 'string' || body.event.length > MAX_EVENT_CHARS) {
     return c.json(
       {
         status: 'error',
         code: 'INVALID_EVENT',
-        message: 'Telemetry payload must include a string "event" field.',
+        message: `Telemetry payload must include a string "event" field (max ${MAX_EVENT_CHARS} characters).`,
       },
       400,
     );
@@ -963,15 +1601,18 @@ app.post('/api/telemetry', createTelemetryIdempotencyGate(), createTelemetryPaym
 
   const agentId = c.get('agentId');
   const billingMode = c.get('billingMode');
+  const ownerId = resolveOwnerId(c);
+  const blipId = crypto.randomUUID();
+  c.set('blipId', blipId);
 
-  try {
-    const { blipId, persisted } = await persistTelemetryBlip(c.env, agentId, body, billingMode);
+  const { persisted } = await persistTelemetryBlip(c.env, agentId, body, billingMode, blipId);
 
-    await touchUsageRecord(c.env.USAGE_KV, agentId, {
+  await Promise.allSettled([
+    touchUsageRecord(c.env.USAGE_KV, agentId, {
       lastEvent: body.event,
       billingMode,
-    });
-    await appendActivity(c.env.USAGE_KV, {
+    }),
+    appendActivity(c.env.USAGE_KV, {
       blipId,
       agentId,
       event: body.event,
@@ -979,72 +1620,42 @@ app.post('/api/telemetry', createTelemetryIdempotencyGate(), createTelemetryPaym
       ingestedAt: new Date().toISOString(),
       transactionHash: null,
       success: true,
-    });
-    c.set('blipId', blipId);
+    }),
+    incrementOwnerTracked(c.env.USAGE_KV, ownerId),
+  ]);
 
-    const usageCount = c.get('usageCount');
-    const freeTierLimit = c.get('freeTierLimit');
-    const remainingFreeBlips = Math.max(freeTierLimit - usageCount, 0);
+  const usageCount = c.get('usageCount');
+  const freeTierLimit = c.get('freeTierLimit');
+  const remainingFreeBlips = Math.max(freeTierLimit - usageCount, 0);
 
-    c.executionCtx.waitUntil(
-      maybeSendLowBalanceAlert({
-        env: c.env,
-        agentId,
-        usageCount,
-        freeTierLimit,
-        remainingFreeBlips,
-        billingMode,
-      }),
-    );
-
-    return c.json({
-      status: 'success',
-      blipId,
+  c.executionCtx.waitUntil(
+    maybeSendLowBalanceAlert({
+      env: c.env,
       agentId,
-      event: body.event,
-      billingMode,
-      persisted,
       usageCount,
       freeTierLimit,
-      ingestedAt: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error('[telemetry] ingest error:', error);
-    return c.json(
-      {
-        status: 'error',
-        code: 'INGEST_FAILED',
-        message: error instanceof Error ? error.message : 'Failed to persist telemetry blip',
-      },
-      500,
-    );
-  }
+      remainingFreeBlips,
+      billingMode,
+    }),
+  );
+
+  return c.json({
+    status: 'success',
+    blipId,
+    agentId,
+    ownerId,
+    event: body.event,
+    billingMode,
+    persisted,
+    usageCount,
+    freeTierLimit,
+    ingestedAt: new Date().toISOString(),
+  });
 });
 
 app.post('/api/admin/agent', async (c) => {
-  const expected = c.env.ADMIN_SECRET?.trim();
-  if (!expected) {
-    return c.json(
-      {
-        status: 'error',
-        code: 'ADMIN_SECRET_MISSING',
-        message: 'ADMIN_SECRET is not configured on the worker.',
-      },
-      503,
-    );
-  }
-
-  const provided = resolveAdminSecret(c);
-  if (!provided || !(await secretsMatch(provided, expected))) {
-    return c.json(
-      {
-        status: 'error',
-        code: 'ADMIN_UNAUTHORIZED',
-        message: 'Provide a valid admin credential via the X-Admin-Key header.',
-      },
-      401,
-    );
-  }
+  const unauthorized = await requireAdmin(c);
+  if (unauthorized) return unauthorized;
 
   const agentId = resolveAgentId(c);
   if (!agentId) {
@@ -1131,6 +1742,67 @@ app.post('/api/admin/agent', async (c) => {
     status: 'success',
     applied,
     agent: serializeAgentSnapshot(agentId, record, c.env),
+  });
+});
+
+app.post('/api/admin/owner', async (c) => {
+  const unauthorized = await requireAdmin(c);
+  if (unauthorized) return unauthorized;
+
+  let body: AdminOwnerBody = {};
+  const contentType = c.req.header('Content-Type') ?? '';
+  if (contentType.includes('application/json')) {
+    try {
+      body = await c.req.json<AdminOwnerBody>();
+    } catch {
+      return c.json(
+        {
+          status: 'error',
+          code: 'INVALID_JSON',
+          message: 'Request body must be valid JSON.',
+        },
+        400,
+      );
+    }
+  }
+
+  const ownerId = resolveOwnerId(c);
+  const record = await getOwnerRecord(c.env.USAGE_KV, ownerId);
+  const applied: string[] = [];
+
+  if (body.action === 'subscribe' || body.subscriptionActive === true) {
+    record.subscriptionActive = true;
+    applied.push('subscribe');
+  }
+
+  if (body.action === 'unsubscribe' || body.subscriptionActive === false) {
+    record.subscriptionActive = false;
+    applied.push('unsubscribe');
+  }
+
+  if (body.action === 'reset_tracked' || body.resetTracked === true) {
+    record.trackedBlips = 0;
+    applied.push('resetTracked');
+  }
+
+  if (applied.length === 0) {
+    return c.json(
+      {
+        status: 'error',
+        code: 'NO_ADMIN_ACTION',
+        message: 'Specify action: subscribe, unsubscribe, or reset_tracked.',
+      },
+      400,
+    );
+  }
+
+  record.lastSeen = new Date().toISOString();
+  await putOwnerRecord(c.env.USAGE_KV, record);
+
+  return c.json({
+    status: 'success',
+    applied,
+    platform: serializeOwnerSnapshot(record, c.env),
   });
 });
 

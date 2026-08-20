@@ -127,7 +127,7 @@
 
     .kpis {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 16px;
       margin-bottom: 24px;
     }
@@ -377,6 +377,15 @@
       box-shadow: inset 3px 0 0 var(--gold);
     }
 
+    .activity-table tbody tr.rejected.fresh {
+      box-shadow: inset 3px 0 0 var(--alert);
+    }
+
+    .reason {
+      color: var(--parchment-dim);
+      max-width: 420px;
+    }
+
     .blip-id,
     .tx-hash {
       color: var(--gold-soft);
@@ -451,6 +460,41 @@
       font-size: 0.72rem;
     }
 
+    .upgrade-banner {
+      display: none;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 22px;
+      padding: 16px 18px;
+      border: 1px solid rgba(196, 106, 90, 0.45);
+      background: rgba(196, 60, 60, 0.12);
+      border-radius: 14px;
+    }
+
+    .upgrade-banner.visible {
+      display: flex;
+    }
+
+    .upgrade-banner strong {
+      color: var(--alert);
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .upgrade-banner p {
+      margin: 0;
+      color: var(--parchment);
+      font-size: 0.9rem;
+      max-width: 72ch;
+    }
+
+    body.hud-limited .grid,
+    body.hud-limited .activity-wrap {
+      opacity: 0.42;
+      pointer-events: none;
+    }
+
     @media (max-width: 980px) {
       .kpis, .grid { grid-template-columns: 1fr 1fr; }
       header { flex-direction: column; align-items: flex-start; }
@@ -477,6 +521,14 @@
       </div>
     </header>
 
+    <section id="upgrade-banner" class="upgrade-banner" hidden>
+      <div>
+        <strong>Free HUD allowance used</strong>
+        <p id="upgrade-copy">This workspace has used its 5,000 free tracked requests. Agent ingest and x402 settlement continue. Subscribe to keep the live operator HUD.</p>
+      </div>
+      <button type="button" id="upgrade-subscribe" class="btn-ghost" hidden>Mark subscribed</button>
+    </section>
+
     <section class="kpis">
       <article class="card">
         <div class="label">Active agents</div>
@@ -497,6 +549,11 @@
         <div class="label">x402 settlement</div>
         <div class="value" id="kpi-x402">—</div>
         <div class="hint" id="kpi-network">USDC micro-payments on Base</div>
+      </article>
+      <article class="card">
+        <div class="label">USDC revenue</div>
+        <div class="value" id="kpi-revenue">—</div>
+        <div class="hint" id="kpi-revenue-hint">Settled x402 collections</div>
       </article>
     </section>
 
@@ -542,6 +599,16 @@
       </div>
     </section>
 
+    <section class="panel activity-wrap">
+      <div class="panel-head">
+        <h2>Recent 402 rejections</h2>
+        <span class="pill alert" id="rejection-count">Drop-offs</span>
+      </div>
+      <div class="feed" id="rejections">
+        <div class="empty">No payment rejections yet.</div>
+      </div>
+    </section>
+
     <footer>
       <span>Worker <span id="footer-status">online</span> · GET /api/telemetry/overview · GET /api/telemetry/activity</span>
       <span id="footer-meta">protocol x402</span>
@@ -580,6 +647,22 @@
       const toast = document.getElementById('admin-toast');
       toast.textContent = message;
       toast.classList.toggle('error', isError);
+    }
+
+    function renderUpgrade(platform) {
+      const banner = document.getElementById('upgrade-banner');
+      const copy = document.getElementById('upgrade-copy');
+      const button = document.getElementById('upgrade-subscribe');
+      const limited = Boolean(platform?.upgradeRequired);
+      banner.hidden = !limited;
+      banner.classList.toggle('visible', limited);
+      document.body.classList.toggle('hud-limited', limited);
+      if (!limited) return;
+
+      const tracked = fmt(platform.trackedBlips);
+      const limit = fmt(platform.freeLimit);
+      copy.textContent = `Owner ${platform.ownerId} has tracked ${tracked} blips (free HUD limit ${limit}). Agent ingest and x402 settlement continue. Subscribe to keep the live operator HUD.`;
+      button.hidden = !adminKey();
     }
 
     function pill(kind, text) {
@@ -653,6 +736,7 @@
     }
 
     let seenBlipIds = new Set();
+    let seenRejectionIds = new Set();
 
     function shorten(value, lead = 10, tail = 6) {
       const text = String(value ?? '');
@@ -720,11 +804,55 @@
       `;
     }
 
+    function renderRejections(events) {
+      const mount = document.getElementById('rejections');
+      const count = document.getElementById('rejection-count');
+      const rejected = (events || []).filter((item) => item.success === false);
+      count.textContent = `${rejected.length} drop-offs`;
+
+      if (!rejected.length) {
+        mount.innerHTML = '<div class="empty">No 402 rejections yet. Exhausted free-tier or failed payments appear here.</div>';
+        return;
+      }
+
+      const incomingIds = rejected.map((item) => item.blipId).filter(Boolean);
+      const fresh = new Set(incomingIds.filter((id) => !seenRejectionIds.has(id)));
+      if (seenRejectionIds.size === 0) fresh.clear();
+      seenRejectionIds = new Set(incomingIds);
+
+      mount.innerHTML = `
+        <table class="activity-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Code</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rejected.slice(0, 25).map((item) => `
+              <tr class="rejected ${fresh.has(item.blipId) ? 'fresh' : ''}">
+                <td class="mono" style="color:var(--parchment-dim);white-space:nowrap;">${rel(item.ingestedAt)}</td>
+                <td>
+                  <strong>${escapeHtml(item.event)}</strong>
+                  <div class="mono" style="color:var(--parchment-dim);margin-top:4px;">${escapeHtml(item.agentId)}</div>
+                </td>
+                <td>${pill('alert', escapeHtml(item.errorCode || '402'))}</td>
+                <td class="reason">${escapeHtml(item.errorReason || 'Payment required')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
     async function loadActivity() {
       const response = await fetch('/api/telemetry/activity?limit=25');
       if (!response.ok) throw new Error('Activity request failed');
       const data = await response.json();
       renderFeed(data.events || data.recent || []);
+      renderRejections(data.rejections || []);
     }
 
     async function loadOverview() {
@@ -737,6 +865,8 @@
       document.getElementById('kpi-usage').textContent = fmt(totals.usageCount);
       document.getElementById('kpi-free').textContent = fmt(totals.remainingFreeBlips);
       document.getElementById('kpi-x402').textContent = totals.paidAgents > 0 ? 'Required' : 'Standby';
+      document.getElementById('kpi-revenue').textContent = `$${totals.revenueUsdc ?? '0'}`;
+      document.getElementById('kpi-revenue-hint').textContent = `${fmt(totals.paidSettlements)} settled blips`;
       document.getElementById('kpi-agents').textContent = `${fmt(totals.agents)} total · ${fmt(totals.blockedAgents || 0)} blocked`;
       document.getElementById('kpi-limit').textContent = `${fmt(data.freeTierLimit)} default blips per agent`;
       document.getElementById('kpi-network').textContent = `${data.pricePerBlip} USDC on ${data.network}`;
@@ -744,8 +874,9 @@
       document.getElementById('footer-meta').textContent = `${data.protocol} · ${data.network} · ${data.pricePerBlip}/blip`;
       document.getElementById('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
       document.getElementById('pulse').classList.remove('offline');
-      document.getElementById('live-label').textContent = 'Live';
+      document.getElementById('live-label').textContent = data.platform?.hudLive === false ? 'Limited' : 'Live';
 
+      renderUpgrade(data.platform);
       renderAgents(data);
     }
 
@@ -828,6 +959,30 @@
       document.querySelectorAll('[data-action]').forEach((button) => {
         button.disabled = !enabled;
       });
+      const subscribe = document.getElementById('upgrade-subscribe');
+      subscribe.hidden = document.getElementById('upgrade-banner').hidden || !enabled;
+    });
+    document.getElementById('upgrade-subscribe').addEventListener('click', async () => {
+      const key = adminKey();
+      if (!key) {
+        setToast('Enter an admin key to activate the HUD subscription.', true);
+        return;
+      }
+      const response = await fetch('/api/admin/owner', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': key,
+        },
+        body: JSON.stringify({ action: 'subscribe' }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setToast(data.message || 'Subscription update failed', true);
+        return;
+      }
+      setToast('HUD subscription active');
+      await tick();
     });
     document.getElementById('agent-table').addEventListener('click', async (event) => {
       const button = event.target.closest('[data-action]');
