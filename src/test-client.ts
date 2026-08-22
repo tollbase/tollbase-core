@@ -1,10 +1,10 @@
-import { AgentBlipsClient } from './client';
+import { TollbaseClient } from './client';
 
-const ENDPOINT = 'https://agentblips-core.agentblips-spenser.workers.dev';
+const ENDPOINT = 'https://tollbase.com';
 const AGENT_ID = 'sdk-test-agent-001';
 
 async function main(): Promise<void> {
-  const client = new AgentBlipsClient(ENDPOINT, AGENT_ID);
+  const client = new TollbaseClient(ENDPOINT, AGENT_ID);
 
   console.log('--- getStatus() ---');
   const status = await client.getStatus();

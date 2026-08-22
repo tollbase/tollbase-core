@@ -1,4 +1,4 @@
-# Agentblips Quickstart
+# Tollbase Quickstart
 
 Deploy the Hono worker, point x402 at your USDC wallet on Base, and open the live operator HUD on the same origin. Agent ingest keeps running after the free HUD allowance; the dashboard prompts you to subscribe at **5,000** tracked requests.
 
@@ -68,7 +68,7 @@ These are already in `wrangler.jsonc` `vars`. Change them before deploy:
 npx wrangler deploy
 ```
 
-Wrangler prints the Worker URL, for example `https://agentblips-core.<your-subdomain>.workers.dev`.
+Wrangler prints the Worker URL, for example `https://tollbase-core.<your-subdomain>.workers.dev`. Production traffic should use **[tollbase.com](https://tollbase.com)**.
 
 ---
 
@@ -76,7 +76,7 @@ Wrangler prints the Worker URL, for example `https://agentblips-core.<your-subdo
 
 Open the Worker origin in a browser. Non-`/api/*` routes serve `public/index.html`.
 
-**[Your worker URL](https://agentblips-core.agentblips-spenser.workers.dev)** — replace with the URL from `wrangler deploy`.
+**[tollbase.com](https://tollbase.com)** — or the Worker URL from `wrangler deploy`.
 
 The HUD polls:
 
@@ -128,36 +128,36 @@ Optional header `X-Owner-Id` overrides `OWNER_ID` when one worker serves more th
 The TypeScript SDK lives in this repository as `src/client.ts`.
 
 ```bash
-npm install agentblips-core
+npm install tollbase-core
 # or, from a local checkout:
-# npm install ./agentblips-core
+# npm install ./tollbase-core
 
 npm install viem x402
 ```
 
 ```ts
-import { AgentBlipsClient } from 'agentblips-core/src/client';
+import { TollbaseClient } from 'tollbase-core/src/client';
 ```
 
 Inside this repo:
 
 ```ts
-import { AgentBlipsClient } from './src/client';
+import { TollbaseClient } from './src/client';
 ```
 
 Node 18+ (global `fetch`) or a Cloudflare Worker / modern browser runtime is required.
 
 ---
 
-## 5. Initialize `AgentBlipsClient`
+## 5. Initialize `TollbaseClient`
 
 Every agent needs a **stable ID** (`X-Agent-Id`) and, for paid ingest, a **Base wallet** that can sign EIP-3009 `TransferWithAuthorization` payloads.
 
 ```ts
-import { AgentBlipsClient } from 'agentblips-core/src/client';
+import { TollbaseClient } from 'tollbase-core/src/client';
 
-const client = new AgentBlipsClient(
-  'https://agentblips-core.agentblips-spenser.workers.dev',
+const client = new TollbaseClient(
+  'https://tollbase.com',
   'my-agent-001',
   {
     privateKey: process.env.AGENT_WALLET_PRIVATE_KEY as `0x${string}`,
@@ -265,7 +265,7 @@ if (result.ok && result.paidViaRetry) {
 Disable auto-retry if you want to inspect or sign elsewhere:
 
 ```ts
-const client = new AgentBlipsClient(ENDPOINT, AGENT_ID, {
+const client = new TollbaseClient(ENDPOINT, AGENT_ID, {
   privateKey: process.env.AGENT_WALLET_PRIVATE_KEY as `0x${string}`,
   autoRetryPayment: false,
 });
@@ -321,7 +321,7 @@ The live HUD at `/` exposes the same controls when the admin key is entered in t
 Minimal curl (free tier):
 
 ```bash
-curl -X POST https://agentblips-core.agentblips-spenser.workers.dev/api/telemetry \
+curl -X POST https://tollbase.com/api/telemetry \
   -H "Content-Type: application/json" \
   -H "X-Agent-Id: my-agent-001" \
   -H "X-Idempotency-Key: run-42-step-12" \

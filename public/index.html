@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Agentblips — Telemetry HUD</title>
+  <title>Tollbase — Telemetry HUD</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet" />
@@ -510,7 +510,7 @@
   <div class="shell">
     <header>
       <div class="brand">
-        <h1 class="wordmark">Agent<span>blips</span></h1>
+        <h1 class="wordmark">Toll<span>base</span></h1>
         <p class="tagline">Real-time telemetry HUD for autonomous agent loops.</p>
       </div>
       <div class="meta">
@@ -617,7 +617,7 @@
 
   <script>
     const POLL_MS = 4000;
-    const ADMIN_KEY_STORAGE = 'agentblips.adminKey';
+    const ADMIN_KEY_STORAGE = 'tollbase.adminKey';
     const agentInput = document.getElementById('agent-id');
     const adminKeyInput = document.getElementById('admin-key');
     adminKeyInput.value = sessionStorage.getItem(ADMIN_KEY_STORAGE) || '';

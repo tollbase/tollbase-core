@@ -1,5 +1,5 @@
 {
-  "name": "agentblips-core",
+  "name": "tollbase-core",
   "type": "module",
   "main": "./src/client.ts",
   "types": "./src/client.ts",

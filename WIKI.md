@@ -1,6 +1,6 @@
-# Agentblips Canonical Wiki
+# Tollbase Canonical Wiki
 
-Architectural deep dive for technical leads, protocol builders, and developer communities. This document describes **how** Agentblips turns HTTP into a machine-payable telemetry bus—not how to `npm install` it. For that, see [README.md](./README.md) and [QUICKSTART.md](./QUICKSTART.md).
+Architectural deep dive for technical leads, protocol builders, and developer communities. This document describes **how** Tollbase turns HTTP into a machine-payable telemetry bus—not how to `npm install` it. For that, see [README.md](./README.md) and [QUICKSTART.md](./QUICKSTART.md).
 
 ---
 
@@ -13,13 +13,13 @@ That mismatch is not a UX issue. It is a **protocol issue**. Agents speak HTTP. 
 - telemetry sinks that stay free forever and get abused, or
 - paid APIs that require a human to provision a key before the agent can run.
 
-Agentblips assumes the caller is a loop, not a person. Identity is a stable `X-Agent-Id`. Money is an HTTP status code plus a signed authorization. Settlement happens on-chain, in USDC, on Base.
+Tollbase assumes the caller is a loop, not a person. Identity is a stable `X-Agent-Id`. Money is an HTTP status code plus a signed authorization. Settlement happens on-chain, in USDC, on Base.
 
 ---
 
 ## The x402 Edge Solution
 
-Agentblips resurrects the long-dormant HTTP `402 Payment Required` status code, transforming it into a high-speed machine-to-machine payment gateway.
+Tollbase resurrects the long-dormant HTTP `402 Payment Required` status code, transforming it into a high-speed machine-to-machine payment gateway.
 
 | Property | Mechanic |
 | --- | --- |
@@ -70,8 +70,8 @@ Agent loop ──HTTP──► Cloudflare Worker (Hono)
 
 | Layer | Implementation |
 | --- | --- |
-| Edge | `src/index.ts` — Hono app, `wrangler.jsonc` Worker `agentblips-core` |
-| Client | `src/client.ts` — `AgentBlipsClient`, exported as package root |
+| Edge | `src/index.ts` — Hono app, `wrangler.jsonc` Worker `tollbase-core` |
+| Client | `src/client.ts` — `TollbaseClient`, exported as package root |
 | State | KV namespace `USAGE_KV` |
 | Payments | `x402` (`exact` EVM scheme) + facilitator `https://x402.org/facilitator` |
 | Chain | Base mainnet USDC via EIP-3009 |
@@ -137,7 +137,7 @@ KV is the source of truth for **billing posture**. Postgres is an optional log s
 
 ## Client Settlement Path
 
-`AgentBlipsClient` (`src/client.ts`):
+`TollbaseClient` (`src/client.ts`):
 
 1. `POST /api/telemetry` with `X-Agent-Id` and optional `X-Idempotency-Key`.
 2. On 402, if `privateKey` or `signer` is configured and `autoRetryPayment` is true (default when a signer exists): `selectPaymentRequirements` → `createPaymentHeader` (EIP-3009 typed data via viem) → retry with `X-PAYMENT`, **same idempotency key**.

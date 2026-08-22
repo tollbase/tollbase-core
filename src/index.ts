@@ -902,7 +902,7 @@ function buildPaymentRequirements(
       network,
       maxAmountRequired,
       resource: resourceUrl as Resource,
-      description: 'Agentblips telemetry blip ingestion',
+      description: 'Tollbase telemetry blip ingestion',
       mimeType: 'application/json',
       payTo: getAddress(payTo),
       maxTimeoutSeconds: 300,
@@ -1428,7 +1428,7 @@ app.use(
 
 app.get('/api', (c) => {
   return c.json({
-    project: 'AgentBlips',
+    project: 'Tollbase',
     status: 'online',
     message: 'Real-time telemetry HUD and monitoring sink for autonomous AI agent loops.',
     protocol: 'x402',

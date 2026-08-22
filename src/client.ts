@@ -7,7 +7,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 // Response types (mirror worker JSON contracts)
 // ---------------------------------------------------------------------------
 
-export interface AgentBlipsStatus {
+export interface TollbaseStatus {
   status: 'success';
   agentId: string;
   usageCount: number;
@@ -64,13 +64,13 @@ export class PaymentRequiredError extends Error {
   }
 }
 
-export class AgentBlipsApiError extends Error {
+export class TollbaseApiError extends Error {
   readonly status: number;
   readonly body: ApiErrorBody;
 
   constructor(status: number, body: ApiErrorBody) {
     super(body.message);
-    this.name = 'AgentBlipsApiError';
+    this.name = 'TollbaseApiError';
     this.status = status;
     this.body = body;
   }
@@ -87,7 +87,7 @@ export class PaymentSigningError extends Error {
 }
 
 /** viem LocalAccount or any object x402 can sign EIP-3009 typed data with. */
-export type AgentBlipsSigner = LocalAccount;
+export type TollbaseSigner = LocalAccount;
 
 export interface SendTelemetryOptions {
   /** Stable key sent as `X-Idempotency-Key` so retries reuse the same ingest. */
@@ -96,19 +96,19 @@ export interface SendTelemetryOptions {
   timestamp?: string;
 }
 
-export interface AgentBlipsClientOptions {
+export interface TollbaseClientOptions {
   fetch?: typeof fetch;
   /** Hex-encoded EVM private key used to sign EIP-3009 USDC authorizations. */
   privateKey?: Hex;
   /** Pre-constructed viem account/signer. Takes precedence over `privateKey`. */
-  signer?: AgentBlipsSigner;
+  signer?: TollbaseSigner;
   /** Preferred x402 network when selecting from `accepts` (default: `base`). */
   network?: Network;
   /** Automatically sign and retry when the worker returns HTTP 402 (default: true when a signer is configured). */
   autoRetryPayment?: boolean;
 }
 
-export interface AgentBlipsClientConfig extends AgentBlipsClientOptions {
+export interface TollbaseClientConfig extends TollbaseClientOptions {
   endpoint: string;
   agentId: string;
 }
@@ -117,22 +117,22 @@ export interface AgentBlipsClientConfig extends AgentBlipsClientOptions {
 // Client
 // ---------------------------------------------------------------------------
 
-export class AgentBlipsClient {
+export class TollbaseClient {
   private readonly endpoint: string;
   private readonly agentId: string;
   private readonly fetchImpl: typeof fetch;
-  private readonly signer: AgentBlipsSigner | null;
+  private readonly signer: TollbaseSigner | null;
   private readonly paymentNetwork: Network;
   private readonly autoRetryPayment: boolean;
 
-  constructor(config: AgentBlipsClientConfig);
-  constructor(endpoint: string, agentId: string, options?: AgentBlipsClientOptions);
+  constructor(config: TollbaseClientConfig);
+  constructor(endpoint: string, agentId: string, options?: TollbaseClientOptions);
   constructor(
-    endpointOrConfig: string | AgentBlipsClientConfig,
+    endpointOrConfig: string | TollbaseClientConfig,
     agentId?: string,
-    options: AgentBlipsClientOptions = {},
+    options: TollbaseClientOptions = {},
   ) {
-    const config: AgentBlipsClientConfig =
+    const config: TollbaseClientConfig =
       typeof endpointOrConfig === 'string'
         ? { endpoint: endpointOrConfig, agentId: agentId ?? '', ...options }
         : endpointOrConfig;
@@ -155,7 +155,7 @@ export class AgentBlipsClient {
     try {
       return (await response.json()) as T;
     } catch {
-      throw new AgentBlipsApiError(response.status, {
+      throw new TollbaseApiError(response.status, {
         status: 'error',
         code: 'INVALID_JSON',
         message: 'Worker returned a non-JSON response.',
@@ -214,7 +214,7 @@ export class AgentBlipsClient {
   private async signPaymentChallenge(challenge: PaymentRequiredBody): Promise<string> {
     if (!this.signer) {
       throw new PaymentSigningError(
-        'Cannot sign x402 payment: configure `privateKey` or `signer` on AgentBlipsClient.',
+        'Cannot sign x402 payment: configure `privateKey` or `signer` on TollbaseClient.',
       );
     }
 
@@ -244,7 +244,7 @@ export class AgentBlipsClient {
   }
 
   /** Fetch current allowance and billing metrics for this agent. */
-  async getStatus(): Promise<AgentBlipsStatus> {
+  async getStatus(): Promise<TollbaseStatus> {
     const response = await this.fetchImpl(`${this.endpoint}/api/telemetry/status`, {
       method: 'GET',
       headers: this.agentHeaders(),
@@ -252,10 +252,10 @@ export class AgentBlipsClient {
 
     if (!response.ok) {
       const body = await this.parseJson<ApiErrorBody>(response);
-      throw new AgentBlipsApiError(response.status, body);
+      throw new TollbaseApiError(response.status, body);
     }
 
-    return this.parseJson<AgentBlipsStatus>(response);
+    return this.parseJson<TollbaseStatus>(response);
   }
 
   /**
@@ -346,7 +346,7 @@ export class AgentBlipsClient {
       throw new PaymentRequiredError(result.challenge);
     }
 
-    throw new AgentBlipsApiError(result.status, result.error);
+    throw new TollbaseApiError(result.status, result.error);
   }
 }
 
