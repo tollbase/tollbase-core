@@ -50,7 +50,7 @@
 
     header {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
       justify-content: space-between;
       gap: 24px;
       padding-bottom: 22px;
@@ -59,6 +59,18 @@
     }
 
     .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .brand img {
+      height: 48px;
+      width: auto;
+      border-radius: 6px;
+    }
+
+    .brand > div {
       display: flex;
       flex-direction: column;
       gap: 6px;
@@ -236,6 +248,15 @@
     .pill.alert { color: var(--alert); border-color: rgba(196, 106, 90, 0.4); background: rgba(196, 106, 90, 0.1); }
     .pill.gold { color: var(--gold-soft); border-color: var(--line); background: rgba(198, 161, 91, 0.08); }
 
+    .forensics {
+      margin-top: 6px;
+      color: var(--parchment-dim);
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.72rem;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
     .bar {
       height: 6px;
       border-radius: 99px;
@@ -352,7 +373,8 @@
       overflow: auto;
     }
 
-    .activity-wrap {
+    .activity-wrap,
+    .radar-wrap {
       margin-top: 16px;
     }
 
@@ -495,6 +517,47 @@
       pointer-events: none;
     }
 
+    .view-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: -6px 0 22px;
+    }
+
+    .view-tab {
+      display: inline-flex;
+      align-items: center;
+      text-decoration: none;
+      color: var(--parchment-dim);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 12px;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+    }
+
+    .view-tab.active {
+      color: var(--gold);
+      border-color: rgba(198, 161, 91, 0.55);
+      background: rgba(198, 161, 91, 0.12);
+    }
+
+    .directory-search {
+      display: flex;
+      gap: 8px;
+      padding: 0 18px 16px;
+    }
+
+    .directory-search input { width: 100%; }
+
+    .crawler-note {
+      margin: 0;
+      padding: 0 18px 16px;
+      color: var(--parchment-dim);
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.72rem;
+    }
+
     @media (max-width: 980px) {
       .kpis, .grid { grid-template-columns: 1fr 1fr; }
       header { flex-direction: column; align-items: flex-start; }
@@ -509,9 +572,12 @@
 <body>
   <div class="shell">
     <header>
-      <div class="brand">
-        <h1 class="wordmark">Toll<span>base</span></h1>
-        <p class="tagline">Real-time telemetry HUD for autonomous agent loops.</p>
+      <div class="brand" style="display: flex; align-items: center; gap: 16px;">
+        <img src="/tollbase-logo.png" alt="Tollbase Logo" style="height: 48px; width: auto; border-radius: 6px;" />
+        <div>
+          <h1 class="wordmark">Toll<span>base</span></h1>
+          <p class="tagline">Real-time telemetry HUD for autonomous agent loops.</p>
+        </div>
       </div>
       <div class="meta">
         <label for="admin-key" class="sr-only">Admin key</label>
@@ -521,6 +587,12 @@
       </div>
     </header>
 
+    <nav class="view-tabs" aria-label="Workspace views">
+      <a href="#hud" id="tab-hud" class="view-tab active">Operator HUD</a>
+      <a href="#directory" id="tab-directory" class="view-tab">Public directory</a>
+    </nav>
+
+    <div id="view-hud">
     <section id="upgrade-banner" class="upgrade-banner" hidden>
       <div>
         <strong>Free HUD allowance used</strong>
@@ -609,8 +681,57 @@
       </div>
     </section>
 
+    <section class="panel radar-wrap">
+      <div class="panel-head">
+        <h2>Radar forensics</h2>
+        <span class="pill gold" id="radar-count">Free tier</span>
+      </div>
+      <div class="feed" id="radar">
+        <div class="empty">Waiting for unauthenticated or bot traffic…</div>
+      </div>
+    </section>
+    </div>
+
+    <div id="view-directory" hidden>
+      <section class="panel radar-wrap">
+        <div class="panel-head">
+          <h2>Scraper-friendly registry</h2>
+          <span class="pill gold" id="directory-count">0 nodes</span>
+        </div>
+        <p class="crawler-note">Agents and crawlers: GET /api/directory · GET /api/directory/{nodeId} · pay with X-PAYMENT on Base USDC.</p>
+        <form class="directory-search" id="directory-search-form" action="/api/directory" method="get">
+          <label for="directory-q" class="sr-only">Search directory</label>
+          <input id="directory-q" name="q" type="search" placeholder="Search site name or domain" autocomplete="off" />
+          <button type="submit">Search</button>
+        </form>
+        <div class="feed" id="directory-table">
+          <div class="empty">Loading opted-in data sources…</div>
+        </div>
+      </section>
+
+      <section class="panel radar-wrap" id="directory-register-panel" hidden>
+        <div class="panel-head">
+          <h2>Opt in a node</h2>
+          <span class="pill gold">Admin</span>
+        </div>
+        <form class="inspect" id="directory-register-form">
+          <label for="dir-domain">Domain</label>
+          <input id="dir-domain" placeholder="docs.example.com" spellcheck="false" />
+          <label for="dir-name">Site name</label>
+          <input id="dir-name" placeholder="Example docs" />
+          <label for="dir-description">Description</label>
+          <input id="dir-description" placeholder="Public x402 data source" />
+          <div class="row">
+            <button type="submit">Register node</button>
+            <button type="button" class="btn-ghost" id="dir-deactivate">Deactivate</button>
+          </div>
+          <div class="toast" id="directory-toast"></div>
+        </form>
+      </section>
+    </div>
+
     <footer>
-      <span>Worker <span id="footer-status">online</span> · GET /api/telemetry/overview · GET /api/telemetry/activity</span>
+      <span>Worker <span id="footer-status">online</span> · GET /api/directory · GET /api/telemetry/overview</span>
       <span id="footer-meta">protocol x402</span>
     </footer>
   </div>
@@ -667,6 +788,21 @@
 
     function pill(kind, text) {
       return `<span class="pill ${kind}">${text}</span>`;
+    }
+
+    function forensicsLine(item) {
+      const radar = item && item.radar;
+      if (!radar) return '';
+      const method = radar.method || '';
+      const path = radar.path || '';
+      const ip = radar.sourceIp || '';
+      const ua = radar.userAgent ? shorten(radar.userAgent, 28, 12) : 'missing-ua';
+      const labels = Array.isArray(radar.bot && radar.bot.labels) ? radar.bot.labels.slice(0, 4) : [];
+      const country = radar.country ? ` · ${radar.country}` : '';
+      const org = radar.asOrganization ? ` · ${shorten(radar.asOrganization, 18, 6)}` : '';
+      const bot = labels.length ? ` · ${labels.join(', ')}` : '';
+      const target = [method, path].filter(Boolean).join(' ');
+      return `<div class="forensics">${escapeHtml([target, ip + country + org, ua].filter(Boolean).join(' · '))}${escapeHtml(bot)}</div>`;
     }
 
     function renderAgents(overview) {
@@ -737,6 +873,7 @@
 
     let seenBlipIds = new Set();
     let seenRejectionIds = new Set();
+    let directoryNodes = [];
 
     function shorten(value, lead = 10, tail = 6) {
       const text = String(value ?? '');
@@ -792,6 +929,7 @@
                   <td>
                     <strong>${escapeHtml(item.event)}</strong>
                     <div class="mono" style="color:var(--parchment-dim);margin-top:4px;">${escapeHtml(item.agentId)}</div>
+                    ${forensicsLine(item)}
                   </td>
                   <td>${blip}</td>
                   <td>${hashCell}</td>
@@ -837,6 +975,7 @@
                 <td>
                   <strong>${escapeHtml(item.event)}</strong>
                   <div class="mono" style="color:var(--parchment-dim);margin-top:4px;">${escapeHtml(item.agentId)}</div>
+                  ${forensicsLine(item)}
                 </td>
                 <td>${pill('alert', escapeHtml(item.errorCode || '402'))}</td>
                 <td class="reason">${escapeHtml(item.errorReason || 'Payment required')}</td>
@@ -847,12 +986,145 @@
       `;
     }
 
+    function renderRadar(events) {
+      const mount = document.getElementById('radar');
+      const count = document.getElementById('radar-count');
+      const probes = events || [];
+      count.textContent = `${probes.length} hits`;
+
+      if (!probes.length) {
+        mount.innerHTML = '<div class="empty">No unauthenticated or bot traffic captured yet. Probes still ingest into USAGE_KV without blocking valid agents.</div>';
+        return;
+      }
+
+      mount.innerHTML = `
+        <table class="activity-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Target</th>
+              <th>Source</th>
+              <th>Signature</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${probes.slice(0, 25).map((item) => {
+              const radar = item.radar || {};
+              const labels = Array.isArray(radar.bot && radar.bot.labels) && radar.bot.labels.length
+                ? radar.bot.labels.join(', ')
+                : (item.event || 'probe');
+              const ua = radar.userAgent || 'missing-ua';
+              return `
+              <tr>
+                <td class="mono" style="color:var(--parchment-dim);white-space:nowrap;">${rel(item.ingestedAt || radar.timestamp)}</td>
+                <td>
+                  <strong>${escapeHtml((radar.method || '') + ' ' + (radar.path || item.errorReason || ''))}</strong>
+                  <div class="mono" style="color:var(--parchment-dim);margin-top:4px;">${escapeHtml(item.agentId || 'anonymous')}</div>
+                </td>
+                <td class="mono">${escapeHtml([radar.sourceIp, radar.country, radar.asOrganization].filter(Boolean).join(' · ') || 'unknown')}</td>
+                <td>
+                  ${pill(radar.bot && radar.bot.verifiedBot ? 'ok' : 'warn', escapeHtml(labels))}
+                  <div class="forensics" title="${escapeHtml(ua)}">${escapeHtml(shorten(ua, 36, 16))}</div>
+                </td>
+              </tr>
+            `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    function currentView() {
+      return location.hash === '#directory' ? 'directory' : 'hud';
+    }
+
+    function applyView() {
+      const view = currentView();
+      document.getElementById('view-hud').hidden = view !== 'hud';
+      document.getElementById('view-directory').hidden = view !== 'directory';
+      document.getElementById('tab-hud').classList.toggle('active', view === 'hud');
+      document.getElementById('tab-directory').classList.toggle('active', view === 'directory');
+      document.getElementById('directory-register-panel').hidden = view !== 'directory' || !adminKey();
+      if (view === 'directory') {
+        loadDirectory().catch((error) => {
+          document.getElementById('directory-table').innerHTML =
+            `<div class="empty">${escapeHtml(error instanceof Error ? error.message : 'Directory request failed')}</div>`;
+        });
+      }
+    }
+
+    function renderDirectory(nodes, query) {
+      const mount = document.getElementById('directory-table');
+      const count = document.getElementById('directory-count');
+      const needle = (query || '').trim().toLowerCase();
+      const filtered = (nodes || []).filter((node) => {
+        if (!needle) return true;
+        const haystack = [node.siteName, node.domain, node.origin, node.description, node.nodeId].join(' ').toLowerCase();
+        return haystack.includes(needle);
+      });
+      count.textContent = `${filtered.length} node${filtered.length === 1 ? '' : 's'}`;
+
+      if (!filtered.length) {
+        mount.innerHTML = '<div class="empty">No opted-in data sources match this search. Agents can still GET /api/directory.</div>';
+        return;
+      }
+
+      mount.innerHTML = `
+        <table class="activity-table">
+          <thead>
+            <tr>
+              <th>Site</th>
+              <th>Domain</th>
+              <th>Status</th>
+              <th>Network</th>
+              <th>Price</th>
+              <th>Ingest</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filtered.map((node) => {
+              const ingest = (node.endpoints && node.endpoints.ingest) || '';
+              return `
+                <tr>
+                  <td>
+                    <strong>${escapeHtml(node.siteName || node.domain)}</strong>
+                    <div class="forensics">${escapeHtml(node.description || 'x402 micropayment node')}</div>
+                  </td>
+                  <td class="mono">${escapeHtml(node.domain)}</td>
+                  <td>${node.active ? pill('ok', node.status || 'active') : pill('alert', 'inactive')}</td>
+                  <td class="mono">${escapeHtml((node.network || 'base') + ' · ' + (node.currency || 'USDC'))}</td>
+                  <td class="mono">${escapeHtml(node.pricePerBlip || '$0.001')}</td>
+                  <td>
+                    <span class="blip-id mono" title="${escapeHtml(ingest)}">${escapeHtml(shorten(ingest, 18, 10))}</span>
+                    ${ingest ? `<button type="button" class="copy" data-copy="${escapeHtml(ingest)}">Copy</button>` : ''}
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    async function loadDirectory() {
+      const query = document.getElementById('directory-q').value.trim();
+      const response = await fetch('/api/directory?limit=100' + (query ? `&q=${encodeURIComponent(query)}` : ''));
+      if (!response.ok) throw new Error('Directory request failed');
+      const data = await response.json();
+      directoryNodes = data.nodes || [];
+      renderDirectory(directoryNodes, query);
+      document.getElementById('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      document.getElementById('pulse').classList.remove('offline');
+      document.getElementById('live-label').textContent = 'Live';
+    }
+
     async function loadActivity() {
       const response = await fetch('/api/telemetry/activity?limit=25');
       if (!response.ok) throw new Error('Activity request failed');
       const data = await response.json();
       renderFeed(data.events || data.recent || []);
       renderRejections(data.rejections || []);
+      renderRadar(data.radar || []);
     }
 
     async function loadOverview() {
@@ -928,6 +1200,10 @@
 
     async function tick() {
       try {
+        if (currentView() === 'directory') {
+          await loadDirectory();
+          return;
+        }
         await loadOverview();
         await loadActivity();
         await inspectAgent();
@@ -961,6 +1237,7 @@
       });
       const subscribe = document.getElementById('upgrade-subscribe');
       subscribe.hidden = document.getElementById('upgrade-banner').hidden || !enabled;
+      document.getElementById('directory-register-panel').hidden = currentView() !== 'directory' || !enabled;
     });
     document.getElementById('upgrade-subscribe').addEventListener('click', async () => {
       const key = adminKey();
@@ -1007,6 +1284,69 @@
       if (action === 'block' && !window.confirm(`Block ${agentId} from ingesting telemetry?`)) return;
       await adminAction(agentId, action);
     });
+
+    document.getElementById('directory-table').addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-copy]');
+      if (!button) return;
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy);
+        button.textContent = 'Copied';
+        setTimeout(() => { button.textContent = 'Copy'; }, 1200);
+      } catch {
+        button.textContent = 'Fail';
+      }
+    });
+
+    document.getElementById('directory-search-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      loadDirectory().catch((error) => {
+        document.getElementById('directory-table').innerHTML =
+          `<div class="empty">${escapeHtml(error instanceof Error ? error.message : 'Directory request failed')}</div>`;
+      });
+    });
+    document.getElementById('directory-q').addEventListener('input', () => {
+      renderDirectory(directoryNodes, document.getElementById('directory-q').value);
+    });
+
+    async function registerDirectoryNode(action) {
+      const key = adminKey();
+      const toast = document.getElementById('directory-toast');
+      if (!key) {
+        toast.textContent = 'Enter an admin key to opt in a node.';
+        toast.classList.add('error');
+        return;
+      }
+      const domain = document.getElementById('dir-domain').value.trim();
+      const response = await fetch('/api/admin/directory', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': key,
+        },
+        body: JSON.stringify({
+          action,
+          domain,
+          siteName: document.getElementById('dir-name').value.trim(),
+          description: document.getElementById('dir-description').value.trim(),
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      toast.classList.toggle('error', !response.ok);
+      toast.textContent = response.ok
+        ? `${data.node?.domain || domain}: ${action}`
+        : (data.message || 'Directory update failed');
+      if (response.ok) await loadDirectory();
+    }
+
+    document.getElementById('directory-register-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      await registerDirectoryNode('register');
+    });
+    document.getElementById('dir-deactivate').addEventListener('click', async () => {
+      await registerDirectoryNode('deactivate');
+    });
+    window.addEventListener('hashchange', applyView);
+    applyView();
 
     tick();
     setInterval(tick, POLL_MS);

@@ -28,6 +28,7 @@ export interface TelemetrySuccess {
   usageCount: number;
   freeTierLimit: number;
   ingestedAt: string;
+  transactionHash?: string | null;
   idempotentReplay?: boolean;
 }
 
@@ -40,6 +41,11 @@ export interface PaymentRequiredBody {
   freeTierLimit?: number;
   x402Version: number;
   accepts: PaymentRequirements[];
+  error?: string;
+  pricePerBlip?: string;
+  currency?: string;
+  network?: string;
+  facilitatorUrl?: string;
 }
 
 export interface ApiErrorBody {

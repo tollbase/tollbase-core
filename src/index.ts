@@ -78,6 +78,7 @@ type Variables = {
   telemetryBody?: TelemetryBlip;
   idempotencyKey?: string;
   blipId?: string;
+  radar?: RadarForensics;
 };
 
 type TelemetryBlip = {
@@ -122,6 +123,61 @@ type OwnerRecord = {
   lastSeen?: string;
 };
 
+type DirectoryNode = {
+  nodeId: string;
+  siteName: string;
+  domain: string;
+  origin: string;
+  description?: string;
+  active: boolean;
+  optedIn: boolean;
+  network: string;
+  currency: string;
+  pricePerBlip: string;
+  x402Version: number;
+  scheme: 'exact';
+  facilitatorUrl: string;
+  ingestUrl: string;
+  statusUrl: string;
+  directoryUrl: string;
+  ownerId?: string;
+  registeredAt: string;
+  updatedAt: string;
+  lastSeen?: string;
+};
+
+type DirectoryAdminAction = 'register' | 'update' | 'activate' | 'deactivate';
+
+type DirectoryAdminBody = {
+  action?: DirectoryAdminAction;
+  domain?: string;
+  siteName?: string;
+  description?: string;
+  ingestPath?: string;
+  active?: boolean;
+};
+
+type BotSignature = {
+  labels: string[];
+  verifiedBot?: boolean;
+  score?: number;
+  detectionIds?: number[];
+};
+
+type RadarForensics = {
+  method: string;
+  path: string;
+  timestamp: string;
+  sourceIp: string;
+  userAgent: string;
+  bot: BotSignature;
+  headers: Record<string, string>;
+  authenticated: boolean;
+  country?: string;
+  asOrganization?: string;
+  ray?: string;
+};
+
 type ActivityEntry = {
   blipId: string;
   agentId: string;
@@ -133,6 +189,7 @@ type ActivityEntry = {
   errorCode?: string;
   errorReason?: string;
   status?: number;
+  radar?: RadarForensics;
 };
 
 type RevenueRecord = {
@@ -145,8 +202,66 @@ type AppContext = Context<{ Bindings: Env; Variables: Variables }>;
 
 const ACTIVITY_KEY = 'activity:recent';
 const REJECTION_KEY = 'activity:rejections';
+const RADAR_KEY = 'activity:radar';
 const REVENUE_KEY = 'revenue:total';
+const DIRECTORY_PREFIX = 'directory:';
 const ACTIVITY_LIMIT = 40;
+const DIRECTORY_LIST_LIMIT = 100;
+const MAX_SITE_NAME_CHARS = 80;
+const MAX_DOMAIN_CHARS = 253;
+const MAX_DESCRIPTION_CHARS = 280;
+const MAX_UA_CHARS = 512;
+const MAX_HEADER_VALUE_CHARS = 256;
+const MAX_PATH_CHARS = 512;
+const FORENSIC_HEADER_NAMES = [
+  'user-agent',
+  'cf-connecting-ip',
+  'x-forwarded-for',
+  'cf-ipcountry',
+  'cf-ray',
+  'cf-visitor',
+  'accept',
+  'accept-language',
+  'accept-encoding',
+  'referer',
+  'origin',
+  'content-type',
+  'host',
+  'x-agent-id',
+  'x-owner-id',
+] as const;
+const BOT_UA_SIGNATURES: Array<{ label: string; pattern: RegExp }> = [
+  { label: 'curl', pattern: /\bcurl\//i },
+  { label: 'wget', pattern: /\bwget\//i },
+  { label: 'python-requests', pattern: /\bpython-requests\//i },
+  { label: 'python-urllib', pattern: /\burllib\b/i },
+  { label: 'scrapy', pattern: /\bscrapy\b/i },
+  { label: 'httpclient', pattern: /\bhttpclient\b/i },
+  { label: 'go-http', pattern: /\bgo-http-client\b/i },
+  { label: 'axios', pattern: /\baxios\//i },
+  { label: 'node-fetch', pattern: /\bnode-fetch\b/i },
+  { label: 'undici', pattern: /\bundici\b/i },
+  { label: 'postman', pattern: /\bpostmanruntime\b|\bpostman\b/i },
+  { label: 'headless-chrome', pattern: /headlesschrome/i },
+  { label: 'puppeteer', pattern: /\bpuppeteer\b/i },
+  { label: 'playwright', pattern: /\bplaywright\b/i },
+  { label: 'selenium', pattern: /\bselenium\b/i },
+  { label: 'phantomjs', pattern: /\bphantomjs\b/i },
+  { label: 'googlebot', pattern: /\bgooglebot\b/i },
+  { label: 'bingbot', pattern: /\bbingbot\b/i },
+  { label: 'gptbot', pattern: /\bgptbot\b/i },
+  { label: 'claudebot', pattern: /\bclaudebot\b|\banthropic-ai\b/i },
+  { label: 'chatgpt', pattern: /\bchatgpt-user\b/i },
+  { label: 'ccbot', pattern: /\bccbot\b/i },
+  { label: 'bytespider', pattern: /\bbytespider\b/i },
+  { label: 'semrush', pattern: /\bsemrushbot\b/i },
+  { label: 'ahrefs', pattern: /\bahrefsbot\b/i },
+  { label: 'facebook', pattern: /\bfacebookexternalhit\b/i },
+  { label: 'generic-bot', pattern: /\b(bot|crawler|spider|scraper)\b/i },
+];
+const PROBE_PATH_PATTERN =
+  /\/(wp-admin|wp-login|xmlrpc\.php|phpmyadmin|\.env|\.git|vendor\/phpunit|actuator|server-status)/i;
+const STATIC_PATH_PATTERN = /\.(?:css|js|map|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|html)$/i;
 const ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 const IDEMPOTENCY_TTL_SECONDS = 60;
 const IDEMPOTENCY_HEADER_MAX = 200;
@@ -257,6 +372,146 @@ function clientIp(c: Context): string {
   const forwarded = c.req.header('X-Forwarded-For')?.split(',')[0]?.trim();
   if (forwarded) return forwarded;
   return 'unknown';
+}
+
+function clampText(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max)}…`;
+}
+
+function detectBotSignatures(
+  userAgent: string,
+  cf: IncomingRequestCfProperties | undefined,
+): BotSignature {
+  const labels: string[] = [];
+  if (!userAgent) labels.push('missing-ua');
+  for (const signature of BOT_UA_SIGNATURES) {
+    if (signature.pattern.test(userAgent) && !labels.includes(signature.label)) {
+      labels.push(signature.label);
+    }
+  }
+
+  const botManagement = cf?.botManagement;
+  const verifiedBot = botManagement?.verifiedBot === true;
+  const score = typeof botManagement?.score === 'number' ? botManagement.score : undefined;
+  const detectionIds = Array.isArray(botManagement?.detectionIds)
+    ? botManagement.detectionIds.filter((id) => Number.isFinite(id))
+    : undefined;
+
+  if (verifiedBot && !labels.includes('cf-verified-bot')) labels.push('cf-verified-bot');
+  if (typeof score === 'number' && score <= 30 && !labels.includes('cf-likely-bot')) {
+    labels.push('cf-likely-bot');
+  }
+
+  return {
+    labels,
+    verifiedBot,
+    score,
+    detectionIds: detectionIds && detectionIds.length > 0 ? detectionIds : undefined,
+  };
+}
+
+function collectForensicHeaders(headers: Headers): Record<string, string> {
+  const captured: Record<string, string> = {};
+  for (const name of FORENSIC_HEADER_NAMES) {
+    const value = headers.get(name)?.trim();
+    if (value) captured[name] = clampText(value, MAX_HEADER_VALUE_CHARS);
+  }
+  return captured;
+}
+
+function collectRequestForensics(c: Context): RadarForensics {
+  let path = '/';
+  try {
+    const url = new URL(c.req.url);
+    path = clampText(`${url.pathname}${url.search}`, MAX_PATH_CHARS);
+  } catch {
+    path = clampText(c.req.path || '/', MAX_PATH_CHARS);
+  }
+
+  const userAgent = clampText(c.req.header('User-Agent')?.trim() ?? '', MAX_UA_CHARS);
+  const cf = c.req.raw.cf as IncomingRequestCfProperties | undefined;
+  const country = typeof cf?.country === 'string' && cf.country ? cf.country : undefined;
+  const asOrganization =
+    typeof cf?.asOrganization === 'string' && cf.asOrganization ? cf.asOrganization : undefined;
+  const ray = c.req.header('CF-Ray')?.trim();
+  let authenticated = false;
+  try {
+    authenticated = Boolean(resolveAgentId(c as Context<{ Bindings: Env; Variables: Variables }>));
+  } catch {
+    authenticated = false;
+  }
+
+  return {
+    method: (c.req.method || 'GET').toUpperCase(),
+    path,
+    timestamp: new Date().toISOString(),
+    sourceIp: clientIp(c),
+    userAgent,
+    bot: detectBotSignatures(userAgent, cf),
+    headers: collectForensicHeaders(c.req.raw.headers),
+    authenticated,
+    country,
+    asOrganization,
+    ray: ray ? clampText(ray, MAX_HEADER_VALUE_CHARS) : undefined,
+  };
+}
+
+function isHudOrStaticTraffic(radar: RadarForensics): boolean {
+  if (radar.method === 'OPTIONS') return true;
+  if (radar.method !== 'GET' && radar.method !== 'HEAD') return false;
+  const path = radar.path.split('?')[0] ?? radar.path;
+  if (path === '/' || path === '/index.html') return true;
+  if (STATIC_PATH_PATTERN.test(path)) return true;
+  if (path === '/api' || path === '/api/') return true;
+  if (path.startsWith('/api/telemetry/overview')) return true;
+  if (path.startsWith('/api/telemetry/activity')) return true;
+  if (path.startsWith('/api/telemetry/status')) return true;
+  if (path.startsWith('/api/directory')) return true;
+  return false;
+}
+
+function isAuthenticatedIngest(radar: RadarForensics): boolean {
+  const path = radar.path.split('?')[0] ?? radar.path;
+  return radar.method === 'POST' && path === '/api/telemetry' && radar.authenticated;
+}
+
+function shouldLogRadarProbe(c: AppContext, radar: RadarForensics): boolean {
+  if (isHudOrStaticTraffic(radar)) return false;
+  const status = c.res?.status ?? 0;
+  const path = radar.path.split('?')[0] ?? radar.path;
+  if (isAuthenticatedIngest(radar) && (status < 400 || status === 402)) return false;
+  if (path.startsWith('/api/admin/') && status < 400) return false;
+  if (!radar.authenticated) return true;
+  if (radar.bot.labels.length > 0 && radar.bot.verifiedBot !== true) return true;
+  if (status === 401 || status === 403 || status === 404 || status === 429) return true;
+  return PROBE_PATH_PATTERN.test(path);
+}
+
+function buildRadarEntry(c: AppContext, radar: RadarForensics): ActivityEntry {
+  const agentId = resolveAgentId(c) ?? 'anonymous';
+  const primaryLabel = radar.bot.labels[0] ?? 'probe';
+  return {
+    blipId: crypto.randomUUID(),
+    agentId,
+    event: `radar.${primaryLabel}`,
+    billingMode: 'free',
+    ingestedAt: radar.timestamp,
+    transactionHash: null,
+    success: false,
+    errorCode: 'RADAR',
+    errorReason: `${radar.method} ${radar.path}`,
+    status: c.res?.status,
+    radar,
+  };
+}
+
+function scheduleRadarLog(c: AppContext, radar: RadarForensics): void {
+  const entry = buildRadarEntry(c, radar);
+  c.executionCtx.waitUntil(
+    appendRadar(c.env.USAGE_KV, entry).catch((error) => {
+      console.error('[radar] persist failed:', error);
+    }),
+  );
 }
 
 function rateLimitKvKey(scope: string, id: string): string {
@@ -511,6 +766,183 @@ async function incrementOwnerTracked(kv: KVNamespace, ownerId: string): Promise<
   return next;
 }
 
+function directoryKey(nodeId: string): string {
+  return `${DIRECTORY_PREFIX}${nodeId}`;
+}
+
+function requestOrigin(c: Context): string {
+  try {
+    const url = new URL(c.req.url);
+    const proto = c.req.header('X-Forwarded-Proto')?.split(',')[0]?.trim() || url.protocol.replace(':', '');
+    const host = c.req.header('X-Forwarded-Host')?.split(',')[0]?.trim() || c.req.header('Host')?.trim() || url.host;
+    const scheme = proto === 'http' ? 'http' : 'https';
+    return `${scheme}://${host}`;
+  } catch {
+    return new URL(c.req.url).origin;
+  }
+}
+
+function slugifyNodeId(hostname: string): string {
+  return hostname.toLowerCase().replace(/[^a-z0-9.-]/g, '-').slice(0, MAX_DOMAIN_CHARS);
+}
+
+function parseDirectoryNode(raw: string | null): DirectoryNode | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as DirectoryNode;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (typeof parsed.nodeId !== 'string' || !parsed.nodeId) return null;
+    if (typeof parsed.domain !== 'string' || !parsed.domain) return null;
+    if (typeof parsed.origin !== 'string' || !parsed.origin) return null;
+    return {
+      nodeId: parsed.nodeId,
+      siteName: typeof parsed.siteName === 'string' && parsed.siteName ? parsed.siteName : parsed.domain,
+      domain: parsed.domain,
+      origin: parsed.origin,
+      description: typeof parsed.description === 'string' ? parsed.description : undefined,
+      active: parsed.active !== false,
+      optedIn: parsed.optedIn !== false,
+      network: typeof parsed.network === 'string' ? parsed.network : DEFAULT_X402_NETWORK,
+      currency: typeof parsed.currency === 'string' ? parsed.currency : 'USDC',
+      pricePerBlip: typeof parsed.pricePerBlip === 'string' ? parsed.pricePerBlip : DEFAULT_TELEMETRY_PRICE,
+      x402Version: Number.isFinite(Number(parsed.x402Version)) ? Number(parsed.x402Version) : X402_VERSION,
+      scheme: 'exact',
+      facilitatorUrl:
+        typeof parsed.facilitatorUrl === 'string' && parsed.facilitatorUrl
+          ? parsed.facilitatorUrl
+          : DEFAULT_FACILITATOR_URL,
+      ingestUrl: typeof parsed.ingestUrl === 'string' ? parsed.ingestUrl : `${parsed.origin}/api/telemetry`,
+      statusUrl: typeof parsed.statusUrl === 'string' ? parsed.statusUrl : `${parsed.origin}/api/telemetry/status`,
+      directoryUrl: typeof parsed.directoryUrl === 'string' ? parsed.directoryUrl : `${parsed.origin}/api/directory`,
+      ownerId: typeof parsed.ownerId === 'string' ? parsed.ownerId : undefined,
+      registeredAt: typeof parsed.registeredAt === 'string' ? parsed.registeredAt : new Date().toISOString(),
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+      lastSeen: typeof parsed.lastSeen === 'string' ? parsed.lastSeen : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function serializeDirectoryNode(node: DirectoryNode) {
+  return {
+    nodeId: node.nodeId,
+    siteName: node.siteName,
+    domain: node.domain,
+    origin: node.origin,
+    description: node.description ?? null,
+    status: node.active ? 'active' : 'inactive',
+    active: node.active,
+    optedIn: node.optedIn,
+    network: node.network,
+    currency: node.currency,
+    pricePerBlip: node.pricePerBlip,
+    x402Version: node.x402Version,
+    scheme: node.scheme,
+    facilitatorUrl: node.facilitatorUrl,
+    endpoints: {
+      ingest: node.ingestUrl,
+      status: node.statusUrl,
+      directory: node.directoryUrl,
+    },
+    ownerId: node.ownerId ?? null,
+    lastSeen: node.lastSeen ?? null,
+    registeredAt: node.registeredAt,
+    updatedAt: node.updatedAt,
+  };
+}
+
+function buildSelfDirectoryNode(c: AppContext): DirectoryNode {
+  const origin = requestOrigin(c);
+  let hostname = origin;
+  try {
+    hostname = new URL(origin).hostname;
+  } catch {
+    hostname = origin.replace(/^https?:\/\//, '');
+  }
+  const now = new Date().toISOString();
+  return {
+    nodeId: slugifyNodeId(hostname) || 'self',
+    siteName: 'Tollbase',
+    domain: hostname,
+    origin,
+    description: 'Real-time telemetry HUD for autonomous agent loops.',
+    active: true,
+    optedIn: true,
+    network: resolveX402Network(c.env),
+    currency: 'USDC',
+    pricePerBlip: resolveTelemetryPrice(c.env),
+    x402Version: X402_VERSION,
+    scheme: 'exact',
+    facilitatorUrl: resolveFacilitatorUrl(c.env),
+    ingestUrl: `${origin}/api/telemetry`,
+    statusUrl: `${origin}/api/telemetry/status`,
+    directoryUrl: `${origin}/api/directory`,
+    ownerId: resolveOwnerId(c),
+    registeredAt: now,
+    updatedAt: now,
+    lastSeen: now,
+  };
+}
+
+function normalizeSiteDomain(input: string): { ok: true; hostname: string; origin: string } | { ok: false; message: string } {
+  const trimmed = input.trim();
+  if (!trimmed || trimmed.length > MAX_DOMAIN_CHARS + 32) {
+    return { ok: false, message: 'domain must be a hostname or https URL.' };
+  }
+  if (/[\s\\\\]/.test(trimmed) || trimmed.includes('@') || trimmed.includes(':///') ) {
+    return { ok: false, message: 'domain contains invalid characters.' };
+  }
+  try {
+    const url = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return { ok: false, message: 'domain must use http or https.' };
+    }
+    const hostname = url.hostname.toLowerCase();
+    if (!hostname || hostname.length > MAX_DOMAIN_CHARS) {
+      return { ok: false, message: 'domain hostname is invalid.' };
+    }
+    if (!/^[a-z0-9][a-z0-9.-]*[a-z0-9]$|^[a-z0-9]$/.test(hostname)) {
+      return { ok: false, message: 'domain hostname is invalid.' };
+    }
+    return { ok: true, hostname, origin: url.origin };
+  } catch {
+    return { ok: false, message: 'domain must be a hostname or https URL.' };
+  }
+}
+
+function nodeMatchesQuery(node: DirectoryNode, query: string): boolean {
+  if (!query) return true;
+  const haystack = [node.siteName, node.domain, node.origin, node.description ?? '', node.nodeId]
+    .join(' ')
+    .toLowerCase();
+  return haystack.includes(query);
+}
+
+async function listDirectoryNodes(kv: KVNamespace): Promise<DirectoryNode[]> {
+  const nodes: DirectoryNode[] = [];
+  let cursor: string | undefined;
+  try {
+    do {
+      const page = await withTimeout(
+        kv.list({ prefix: DIRECTORY_PREFIX, cursor, limit: 100 }),
+        KV_LIST_TIMEOUT_MS,
+        'kv.list:directory',
+      );
+      const records = await Promise.all(
+        page.keys.map(async (key) => parseDirectoryNode(await kvGetRaw(kv, key.name))),
+      );
+      for (const record of records) {
+        if (record) nodes.push(record);
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+  } catch (error) {
+    console.error('[kv] list directory failed:', error);
+  }
+  return nodes;
+}
+
 async function secretsMatch(provided: string, expected: string): Promise<boolean> {
   const encoder = new TextEncoder();
   const [left, right] = await Promise.all([
@@ -745,11 +1177,19 @@ async function readActivityList(kv: KVNamespace, key: string): Promise<ActivityE
   }
 }
 
+async function appendCappedActivity(kv: KVNamespace, key: string, entry: ActivityEntry): Promise<void> {
+  const recent = await readActivityList(kv, key);
+  recent.unshift(entry);
+  await kvPutRaw(kv, key, JSON.stringify(recent.slice(0, ACTIVITY_LIMIT)));
+}
+
 async function appendActivity(kv: KVNamespace, entry: ActivityEntry): Promise<void> {
   const key = entry.success === false ? REJECTION_KEY : ACTIVITY_KEY;
-  const recent = await readActivityList(kv, key);
-  recent.unshift({ ...entry, success: entry.success !== false });
-  await kvPutRaw(kv, key, JSON.stringify(recent.slice(0, ACTIVITY_LIMIT)));
+  await appendCappedActivity(kv, key, { ...entry, success: entry.success !== false });
+}
+
+async function appendRadar(kv: KVNamespace, entry: ActivityEntry): Promise<void> {
+  await appendCappedActivity(kv, RADAR_KEY, entry);
 }
 
 async function attachActivityTransaction(
@@ -792,6 +1232,10 @@ async function readRecentRejections(kv: KVNamespace): Promise<ActivityEntry[]> {
   return (await readActivityList(kv, REJECTION_KEY)).filter((entry) => entry.success === false);
 }
 
+async function readRecentRadar(kv: KVNamespace): Promise<ActivityEntry[]> {
+  return readActivityList(kv, RADAR_KEY);
+}
+
 function resolveRejectionEvent(c: AppContext): string {
   const body = c.get('telemetryBody');
   return body && typeof body.event === 'string' && body.event.length > 0 ? body.event : 'telemetry';
@@ -801,8 +1245,7 @@ function scheduleRejectionLog(
   c: AppContext,
   params: { code: string; message: string; agentId?: string },
 ): void {
-  const agentId = params.agentId ?? c.get('agentId') ?? resolveAgentId(c);
-  if (!agentId) return;
+  const agentId = params.agentId ?? c.get('agentId') ?? resolveAgentId(c) ?? 'anonymous';
   const entry: ActivityEntry = {
     blipId: crypto.randomUUID(),
     agentId,
@@ -814,12 +1257,66 @@ function scheduleRejectionLog(
     errorCode: params.code,
     errorReason: params.message,
     status: 402,
+    radar: c.get('radar'),
   };
   c.executionCtx.waitUntil(
     appendActivity(c.env.USAGE_KV, entry).catch((error) => {
       console.error('[activity] failed to log rejection:', error);
     }),
   );
+}
+
+function utf8ToBase64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]!);
+  }
+  return btoa(binary);
+}
+
+function resolveTelemetryPrice(env: Env): string {
+  return env.TELEMETRY_PRICE?.trim() || DEFAULT_TELEMETRY_PRICE;
+}
+
+function resolveX402Network(env: Env): Network {
+  return (env.X402_NETWORK?.trim() || DEFAULT_X402_NETWORK) as Network;
+}
+
+function resolveFacilitatorUrl(env: Env): string {
+  return env.X402_FACILITATOR_URL?.trim() || DEFAULT_FACILITATOR_URL;
+}
+
+function applyX402ChallengeHeaders(
+  c: AppContext,
+  params: {
+    accepts: unknown;
+    error: string;
+    price: string;
+    network: string;
+    facilitatorUrl: string;
+  },
+): void {
+  c.header('X-Payment-Required', 'x402');
+  c.header('X-x402-Version', String(X402_VERSION));
+  c.header('X-Payment-Amount', params.price);
+  c.header('X-Payment-Currency', 'USDC');
+  c.header('X-Payment-Network', params.network);
+  c.header('X-Payment-Facilitator', params.facilitatorUrl);
+  try {
+    c.header(
+      'PAYMENT-REQUIRED',
+      utf8ToBase64(
+        JSON.stringify({
+          x402Version: X402_VERSION,
+          accepts: params.accepts,
+          error: params.error,
+        }),
+      ),
+    );
+  } catch (error) {
+    console.error('[x402] failed to encode PAYMENT-REQUIRED header:', error);
+  }
 }
 
 function paymentRequiredResponse(
@@ -836,8 +1333,33 @@ function paymentRequiredResponse(
     payer?: string;
   },
 ) {
+  const price = resolveTelemetryPrice(c.env);
+  const network = resolveX402Network(c.env);
+  const facilitatorUrl = resolveFacilitatorUrl(c.env);
+  const accepts =
+    body.accepts && typeof body.accepts === 'object'
+      ? toJsonSafe(body.accepts as object)
+      : [];
+  applyX402ChallengeHeaders(c, {
+    accepts,
+    error: body.message,
+    price,
+    network,
+    facilitatorUrl,
+  });
   scheduleRejectionLog(c, { code: body.code, message: body.message, agentId: body.agentId });
-  return c.json(body, 402);
+  return c.json(
+    {
+      ...body,
+      accepts,
+      error: body.message,
+      pricePerBlip: price,
+      currency: 'USDC',
+      network,
+      facilitatorUrl,
+    },
+    402,
+  );
 }
 
 async function listAgentUsage(kv: KVNamespace): Promise<Array<{ agentId: string; record: UsageRecord }>> {
@@ -933,6 +1455,7 @@ async function persistTelemetryBlip(
   blip: TelemetryBlip,
   billingMode: BillingMode,
   blipId = crypto.randomUUID(),
+  radar?: RadarForensics,
 ): Promise<{ blipId: string; persisted: boolean }> {
   const record = {
     id: blipId,
@@ -940,7 +1463,10 @@ async function persistTelemetryBlip(
     event: blip.event,
     payload: blip.payload ?? {},
     session_id: blip.sessionId ?? null,
-    metadata: blip.metadata ?? {},
+    metadata: {
+      ...(blip.metadata ?? {}),
+      ...(radar ? { radar } : {}),
+    },
     billing_mode: billingMode,
     client_timestamp: blip.timestamp ?? null,
     ingested_at: new Date().toISOString(),
@@ -1205,20 +1731,33 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
     c.set('freeTierLimit', freeTierLimit);
     c.set('usageCount', usageCount);
 
-    // Free allowance still available — increment and bypass x402.
+    // Free allowance still available — increment, then re-check so concurrent
+    // admits cannot silently overshoot the default usage limit.
     if (usageCount < freeTierLimit) {
       try {
         const updatedCount = await incrementUsageCount(c.env.USAGE_KV, agentId);
-        c.set('usageCount', updatedCount);
+        if (updatedCount <= freeTierLimit) {
+          c.set('usageCount', updatedCount);
+          c.set('billingMode', 'free');
+          return next();
+        }
+        const latest = await getUsageRecord(c.env.USAGE_KV, agentId);
+        await putUsageRecord(c.env.USAGE_KV, agentId, {
+          ...latest,
+          count: freeTierLimit,
+          billingMode: 'paid',
+          lastSeen: new Date().toISOString(),
+        });
+        c.set('usageCount', freeTierLimit);
       } catch (error) {
         console.error('[kv] usage increment failed:', error);
         c.set('usageCount', usageCount + 1);
+        c.set('billingMode', 'free');
+        return next();
       }
-      c.set('billingMode', 'free');
-      return next();
     }
 
-    // Allowance exhausted — enforce x402 micro-settlement.
+    // Allowance exhausted — enforce x402 micro-settlement immediately.
     c.set('billingMode', 'paid');
 
     const payTo = c.env.X402_PAY_TO as `0x${string}` | undefined;
@@ -1233,9 +1772,9 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
       );
     }
 
-    const network = (c.env.X402_NETWORK ?? DEFAULT_X402_NETWORK) as Network;
-    const price = c.env.TELEMETRY_PRICE ?? DEFAULT_TELEMETRY_PRICE;
-    const facilitatorUrl = (c.env.X402_FACILITATOR_URL ?? DEFAULT_FACILITATOR_URL) as Resource;
+    const network = resolveX402Network(c.env);
+    const price = resolveTelemetryPrice(c.env);
+    const facilitatorUrl = resolveFacilitatorUrl(c.env) as Resource;
 
     const requirementsResult = buildPaymentRequirements(c, payTo, network, price);
     if ('error' in requirementsResult) {
@@ -1251,6 +1790,7 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
 
     const paymentRequirements = requirementsResult;
     const paymentHeaderRaw = c.req.header('X-PAYMENT');
+    const exhaustedUsage = c.get('usageCount');
 
     if (!paymentHeaderRaw) {
       return paymentRequiredResponse(c, {
@@ -1258,7 +1798,7 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
         code: 'FREE_TIER_EXHAUSTED',
         message: `Free telemetry allowance exhausted (${freeTierLimit} blips). Retry with an X-PAYMENT header to settle ${price} USDC on ${network}.`,
         agentId,
-        usageCount,
+        usageCount: exhaustedUsage,
         freeTierLimit,
         x402Version: X402_VERSION,
         accepts: paymentRequirements,
@@ -1356,24 +1896,42 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
         throw new Error(settlement.errorReason ?? 'Settlement failed');
       }
 
-      response.headers.set('X-PAYMENT-RESPONSE', settleResponseHeader(settlement));
-      c.res = response;
+      const transactionHash = typeof settlement.transaction === 'string' ? settlement.transaction : '';
+      const paymentResponseHeader = settleResponseHeader(settlement);
+      let bodyText = await response.clone().text();
+      try {
+        const payload = JSON.parse(bodyText) as Record<string, unknown>;
+        if (payload && typeof payload === 'object') {
+          bodyText = JSON.stringify({
+            ...payload,
+            transactionHash: transactionHash || null,
+            billingMode: 'paid',
+          });
+        }
+      } catch (error) {
+        console.error('[x402] failed to enrich settlement response body:', error);
+      }
+
+      const settledResponse = new Response(bodyText, {
+        status: response.status,
+        headers: new Headers(response.headers),
+      });
+      settledResponse.headers.set('X-PAYMENT-RESPONSE', paymentResponseHeader);
+      settledResponse.headers.set('Content-Type', 'application/json');
+      c.res = settledResponse;
 
       const blipId = c.get('blipId');
-      const transactionHash = typeof settlement.transaction === 'string' ? settlement.transaction : '';
       const atomicAmount = processPriceToAtomicAmount(price, network);
-      c.executionCtx.waitUntil(
-        Promise.all([
-          blipId && transactionHash
-            ? attachActivityTransaction(c.env.USAGE_KV, blipId, transactionHash)
-            : Promise.resolve(),
-          !('error' in atomicAmount)
-            ? incrementRevenue(c.env.USAGE_KV, String(atomicAmount.maxAmountRequired))
-            : Promise.resolve(),
-        ]).catch((error) => {
-          console.error('[x402] post-settlement bookkeeping failed:', error);
-        }),
-      );
+      const ownerId = resolveOwnerId(c);
+      await Promise.allSettled([
+        blipId && transactionHash
+          ? attachActivityTransaction(c.env.USAGE_KV, blipId, transactionHash)
+          : Promise.resolve(),
+        !('error' in atomicAmount)
+          ? incrementRevenue(c.env.USAGE_KV, String(atomicAmount.maxAmountRequired))
+          : Promise.resolve(),
+        incrementOwnerTracked(c.env.USAGE_KV, ownerId),
+      ]);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to settle payment on-chain';
       const blipId = c.get('blipId');
@@ -1391,18 +1949,31 @@ function createTelemetryPaymentGate(): MiddlewareHandler<{
               errorCode: 'SETTLEMENT_FAILED',
               errorReason: message,
               status: 402,
+              radar: c.get('radar'),
             })
         ).catch((logError) => {
           console.error('[activity] failed to log settlement failure:', logError);
         }),
       );
+      applyX402ChallengeHeaders(c, {
+        accepts: toJsonSafe(paymentRequirements),
+        error: message,
+        price,
+        network,
+        facilitatorUrl,
+      });
       c.res = c.json(
         {
           status: 'payment_required',
           code: 'SETTLEMENT_FAILED',
           message,
+          error: message,
           x402Version: X402_VERSION,
-          accepts: paymentRequirements,
+          accepts: toJsonSafe(paymentRequirements),
+          pricePerBlip: price,
+          currency: 'USDC',
+          network,
+          facilitatorUrl,
         },
         402,
       );
@@ -1422,9 +1993,41 @@ app.use(
     origin: '*',
     allowMethods: ['GET', 'POST', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'X-Agent-Id', 'X-Owner-Id', 'X-PAYMENT', 'X-Admin-Key', 'Authorization', 'X-Idempotency-Key'],
-    exposeHeaders: ['X-PAYMENT-RESPONSE', 'X-Idempotency-Replayed'],
+    exposeHeaders: [
+      'X-PAYMENT-RESPONSE',
+      'X-Idempotency-Replayed',
+      'PAYMENT-REQUIRED',
+      'X-Payment-Required',
+      'X-x402-Version',
+      'X-Payment-Amount',
+      'X-Payment-Currency',
+      'X-Payment-Network',
+      'X-Payment-Facilitator',
+    ],
   }),
 );
+
+app.use('*', async (c, next) => {
+  let radar: RadarForensics | undefined;
+  try {
+    radar = collectRequestForensics(c);
+    c.set('radar', radar);
+  } catch (error) {
+    console.error('[radar] collect failed:', error);
+  }
+
+  try {
+    await next();
+  } finally {
+    if (radar) {
+      try {
+        if (shouldLogRadarProbe(c, radar)) scheduleRadarLog(c, radar);
+      } catch (error) {
+        console.error('[radar] schedule failed:', error);
+      }
+    }
+  }
+});
 
 app.get('/api', (c) => {
   return c.json({
@@ -1437,8 +2040,11 @@ app.get('/api', (c) => {
       telemetryStatus: 'GET /api/telemetry/status',
       telemetryOverview: 'GET /api/telemetry/overview',
       telemetryActivity: 'GET /api/telemetry/activity',
+      directory: 'GET /api/directory',
+      directoryNode: 'GET /api/directory/:nodeId',
       adminAgent: 'POST /api/admin/agent',
       adminOwner: 'POST /api/admin/owner',
+      adminDirectory: 'POST /api/admin/directory',
     },
   });
 });
@@ -1484,6 +2090,7 @@ app.get('/api/telemetry/overview', async (c) => {
 
   const recent = await readRecentActivity(c.env.USAGE_KV);
   const rejections = await readRecentRejections(c.env.USAGE_KV);
+  const radar = await readRecentRadar(c.env.USAGE_KV);
   const revenue = await readRevenue(c.env.USAGE_KV);
   const owner = await getOwnerRecord(c.env.USAGE_KV, resolveOwnerId(c));
   const platform = serializeOwnerSnapshot(owner, c.env);
@@ -1520,6 +2127,7 @@ app.get('/api/telemetry/overview', async (c) => {
     agents: platform.hudLive ? agents : [],
     recent: platform.hudLive ? recent : [],
     rejections: platform.hudLive ? rejections : [],
+    radar,
   });
 });
 
@@ -1534,6 +2142,7 @@ app.get('/api/telemetry/activity', async (c) => {
   const rejections = platform.hudLive
     ? (await readRecentRejections(c.env.USAGE_KV)).slice(0, cap)
     : [];
+  const radar = (await readRecentRadar(c.env.USAGE_KV)).slice(0, cap);
   return c.json({
     status: 'success',
     protocol: 'x402',
@@ -1541,6 +2150,7 @@ app.get('/api/telemetry/activity', async (c) => {
     platform,
     events,
     rejections,
+    radar,
   });
 });
 
@@ -1603,9 +2213,10 @@ app.post('/api/telemetry', createTelemetryAbuseGate(), createTelemetryIdempotenc
   const billingMode = c.get('billingMode');
   const ownerId = resolveOwnerId(c);
   const blipId = crypto.randomUUID();
+  const radar = c.get('radar');
   c.set('blipId', blipId);
 
-  const { persisted } = await persistTelemetryBlip(c.env, agentId, body, billingMode, blipId);
+  const { persisted } = await persistTelemetryBlip(c.env, agentId, body, billingMode, blipId, radar);
 
   await Promise.allSettled([
     touchUsageRecord(c.env.USAGE_KV, agentId, {
@@ -1617,11 +2228,12 @@ app.post('/api/telemetry', createTelemetryAbuseGate(), createTelemetryIdempotenc
       agentId,
       event: body.event,
       billingMode,
-      ingestedAt: new Date().toISOString(),
+      ingestedAt: radar?.timestamp ?? new Date().toISOString(),
       transactionHash: null,
       success: true,
+      radar,
     }),
-    incrementOwnerTracked(c.env.USAGE_KV, ownerId),
+    billingMode === 'free' ? incrementOwnerTracked(c.env.USAGE_KV, ownerId) : Promise.resolve(),
   ]);
 
   const usageCount = c.get('usageCount');
@@ -1649,7 +2261,8 @@ app.post('/api/telemetry', createTelemetryAbuseGate(), createTelemetryIdempotenc
     persisted,
     usageCount,
     freeTierLimit,
-    ingestedAt: new Date().toISOString(),
+    ingestedAt: radar?.timestamp ?? new Date().toISOString(),
+    transactionHash: null,
   });
 });
 
@@ -1804,6 +2417,177 @@ app.post('/api/admin/owner', async (c) => {
     applied,
     platform: serializeOwnerSnapshot(record, c.env),
   });
+});
+
+app.get('/api/directory', async (c) => {
+  const query = (c.req.query('q') ?? '').trim().toLowerCase();
+  const includeInactive = parseBooleanFlag(c.req.query('includeInactive')) === true;
+  const limit = Math.min(parsePositiveInt(c.req.query('limit'), 50), DIRECTORY_LIST_LIMIT);
+  const self = buildSelfDirectoryNode(c);
+  const stored = await listDirectoryNodes(c.env.USAGE_KV);
+  const byId = new Map<string, DirectoryNode>();
+  for (const node of stored) byId.set(node.nodeId, node);
+  const existing = byId.get(self.nodeId);
+  byId.set(
+    self.nodeId,
+    existing
+      ? {
+          ...self,
+          ...existing,
+          origin: self.origin,
+          ingestUrl: self.ingestUrl,
+          statusUrl: self.statusUrl,
+          directoryUrl: self.directoryUrl,
+          network: self.network,
+          currency: self.currency,
+          pricePerBlip: self.pricePerBlip,
+          facilitatorUrl: self.facilitatorUrl,
+          lastSeen: self.lastSeen,
+        }
+      : self,
+  );
+
+  let nodes = [...byId.values()].filter((node) => node.optedIn);
+  if (!includeInactive) nodes = nodes.filter((node) => node.active);
+  if (query) nodes = nodes.filter((node) => nodeMatchesQuery(node, query));
+  nodes.sort((a, b) => a.siteName.localeCompare(b.siteName) || a.domain.localeCompare(b.domain));
+  const page = nodes.slice(0, limit);
+
+  c.header('Cache-Control', 'public, max-age=15, stale-while-revalidate=60');
+  return c.json({
+    status: 'success',
+    protocol: 'x402',
+    crawler: {
+      protocol: 'x402',
+      version: X402_VERSION,
+      network: resolveX402Network(c.env),
+      currency: 'USDC',
+      paymentHeader: 'X-PAYMENT',
+      agentHeader: 'X-Agent-Id',
+      ingest: 'POST /api/telemetry',
+    },
+    query: query || null,
+    count: page.length,
+    total: nodes.length,
+    nodes: page.map(serializeDirectoryNode),
+  });
+});
+
+app.get('/api/directory/:nodeId', async (c) => {
+  const nodeId = slugifyNodeId(c.req.param('nodeId') ?? '');
+  if (!nodeId) {
+    return c.json({ status: 'error', code: 'INVALID_NODE', message: 'nodeId is required.' }, 400);
+  }
+
+  const stored = parseDirectoryNode(await kvGetRaw(c.env.USAGE_KV, directoryKey(nodeId)));
+  const self = buildSelfDirectoryNode(c);
+  const node = stored ?? (self.nodeId === nodeId ? self : null);
+  if (!node || !node.optedIn || !node.active) {
+    return c.json({ status: 'error', code: 'NODE_NOT_FOUND', message: 'No active opted-in directory node with that id.' }, 404);
+  }
+
+  c.header('Cache-Control', 'public, max-age=15, stale-while-revalidate=60');
+  return c.json({
+    status: 'success',
+    protocol: 'x402',
+    node: serializeDirectoryNode(node.nodeId === self.nodeId ? { ...node, ...self, siteName: node.siteName, description: node.description } : node),
+  });
+});
+
+app.post('/api/admin/directory', async (c) => {
+  const unauthorized = await requireAdmin(c);
+  if (unauthorized) return unauthorized;
+
+  let body: DirectoryAdminBody = {};
+  const contentType = c.req.header('Content-Type') ?? '';
+  if (contentType.includes('application/json')) {
+    try {
+      body = await c.req.json<DirectoryAdminBody>();
+    } catch {
+      return c.json(
+        {
+          status: 'error',
+          code: 'INVALID_JSON',
+          message: 'Request body must be valid JSON.',
+        },
+        400,
+      );
+    }
+  }
+
+  const action = body.action ?? 'register';
+  const domainInput = typeof body.domain === 'string' ? body.domain : '';
+  const parsedDomain = normalizeSiteDomain(domainInput);
+  if (!parsedDomain.ok) {
+    return c.json({ status: 'error', code: 'INVALID_DOMAIN', message: parsedDomain.message }, 400);
+  }
+
+  const nodeId = slugifyNodeId(parsedDomain.hostname);
+  const now = new Date().toISOString();
+  const current = parseDirectoryNode(await kvGetRaw(c.env.USAGE_KV, directoryKey(nodeId)));
+  const siteName =
+    typeof body.siteName === 'string' && body.siteName.trim()
+      ? body.siteName.trim().slice(0, MAX_SITE_NAME_CHARS)
+      : current?.siteName ?? parsedDomain.hostname;
+  const description =
+    typeof body.description === 'string'
+      ? body.description.trim().slice(0, MAX_DESCRIPTION_CHARS) || undefined
+      : current?.description;
+  const ingestPath =
+    typeof body.ingestPath === 'string' && body.ingestPath.startsWith('/')
+      ? body.ingestPath
+      : '/api/telemetry';
+
+  if (action === 'register' || action === 'update' || action === 'activate' || action === 'deactivate') {
+    const active =
+      action === 'deactivate' ? false : action === 'activate' ? true : body.active !== false;
+    const node: DirectoryNode = {
+      nodeId,
+      siteName,
+      domain: parsedDomain.hostname,
+      origin: parsedDomain.origin,
+      description,
+      active,
+      optedIn: true,
+      network: resolveX402Network(c.env),
+      currency: 'USDC',
+      pricePerBlip: resolveTelemetryPrice(c.env),
+      x402Version: X402_VERSION,
+      scheme: 'exact',
+      facilitatorUrl: resolveFacilitatorUrl(c.env),
+      ingestUrl: `${parsedDomain.origin}${ingestPath}`,
+      statusUrl: `${parsedDomain.origin}/api/telemetry/status`,
+      directoryUrl: `${requestOrigin(c)}/api/directory`,
+      ownerId: resolveOwnerId(c),
+      registeredAt: current?.registeredAt ?? now,
+      updatedAt: now,
+      lastSeen: now,
+    };
+    await kvPutRaw(c.env.USAGE_KV, directoryKey(nodeId), JSON.stringify(node));
+    return c.json({
+      status: 'success',
+      applied: [action],
+      node: serializeDirectoryNode(node),
+    });
+  }
+
+  return c.json(
+    {
+      status: 'error',
+      code: 'NO_ADMIN_ACTION',
+      message: 'Specify action: register, update, activate, or deactivate.',
+    },
+    400,
+  );
+});
+
+app.notFound(async (c) => {
+  try {
+    return await c.env.ASSETS.fetch(c.req.raw);
+  } catch (error) {
+    console.error('[assets] fetch failed:', error);
+    return c.json({ status: 'error', code: 'NOT_FOUND', message: 'Not found.' }, 404);
+  }
 });
 
 export default app;
